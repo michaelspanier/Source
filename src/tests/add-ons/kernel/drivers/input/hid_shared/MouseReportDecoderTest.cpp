@@ -81,6 +81,29 @@ static const uint8 kCherryMouseDescriptor[] = {
 };
 
 
+// Mouse interface of the Logitech Unifying Receiver (USB 046d:c52b, interface
+// 1), read from the device. The mouse (report 2) has everything in one report:
+// 16 buttons, 12 bit X and Y, wheel and pan. The other reports belong to
+// collections of their own: report 3 is a consumer control array whose usage
+// range also covers the pan usage, report 4 is system control, report 8 is
+// vendor specific.
+static const uint8 kLogitechReceiverDescriptor[] = {
+	0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0x85, 0x02, 0x09, 0x01, 0xa1, 0x00,
+	0x05, 0x09, 0x19, 0x01, 0x29, 0x10, 0x15, 0x00, 0x25, 0x01, 0x95, 0x10,
+	0x75, 0x01, 0x81, 0x02, 0x05, 0x01, 0x16, 0x01, 0xf8, 0x26, 0xff, 0x07,
+	0x75, 0x0c, 0x95, 0x02, 0x09, 0x30, 0x09, 0x31, 0x81, 0x06, 0x15, 0x81,
+	0x25, 0x7f, 0x75, 0x08, 0x95, 0x01, 0x09, 0x38, 0x81, 0x06, 0x05, 0x0c,
+	0x0a, 0x38, 0x02, 0x95, 0x01, 0x81, 0x06, 0xc0, 0xc0, 0x05, 0x0c, 0x09,
+	0x01, 0xa1, 0x01, 0x85, 0x03, 0x75, 0x10, 0x95, 0x02, 0x15, 0x01, 0x26,
+	0xff, 0x02, 0x19, 0x01, 0x2a, 0xff, 0x02, 0x81, 0x00, 0xc0, 0x05, 0x01,
+	0x09, 0x80, 0xa1, 0x01, 0x85, 0x04, 0x75, 0x02, 0x95, 0x01, 0x15, 0x01,
+	0x25, 0x03, 0x09, 0x82, 0x09, 0x81, 0x09, 0x83, 0x81, 0x60, 0x75, 0x06,
+	0x81, 0x03, 0xc0, 0x06, 0xbc, 0xff, 0x09, 0x88, 0xa1, 0x01, 0x85, 0x08,
+	0x19, 0x01, 0x29, 0xff, 0x15, 0x01, 0x26, 0xff, 0x00, 0x75, 0x08, 0x95,
+	0x01, 0x81, 0x00, 0xc0
+};
+
+
 // --- Packets of the CHERRY mouse --------------------------------------------
 
 static const uint8 kCherryButtonsReportID = 1;
@@ -112,6 +135,54 @@ static Packet
 cherry_vendor_packet()
 {
 	return Packet{kCherryVendorReportID, 0, 0, 0, 0, 0, 0, 0};
+}
+
+
+// --- Packets of the Logitech receiver ---------------------------------------
+
+static const uint8 kLogitechMouseReportID = 2;
+static const uint8 kLogitechConsumerReportID = 3;
+static const uint8 kLogitechSystemControlReportID = 4;
+static const uint8 kLogitechVendorReportID = 8;
+
+static const uint16 kMiddleButton = 0x0004;
+// The driver reports the first eight buttons, as it always did.
+static const uint16 kEighthButton = 0x0080;
+
+
+static Packet
+logitech_mouse_packet(uint16 buttons, int x, int y, int8 wheel = 0,
+	int8 pan = 0)
+{
+	// 16 buttons, two signed 12 bit axes (X low, Y high), wheel and pan.
+	uint32 packed = ((uint32)x & 0xfff) | (((uint32)y & 0xfff) << 12);
+	return Packet{kLogitechMouseReportID, (uint8)(buttons & 0xff),
+		(uint8)(buttons >> 8), (uint8)(packed & 0xff),
+		(uint8)((packed >> 8) & 0xff), (uint8)((packed >> 16) & 0xff),
+		(uint8)wheel, (uint8)pan};
+}
+
+
+static Packet
+logitech_consumer_packet(uint16 firstUsage, uint16 secondUsage = 0)
+{
+	return Packet{kLogitechConsumerReportID, (uint8)(firstUsage & 0xff),
+		(uint8)(firstUsage >> 8), (uint8)(secondUsage & 0xff),
+		(uint8)(secondUsage >> 8)};
+}
+
+
+static Packet
+logitech_system_control_packet(uint8 keys)
+{
+	return Packet{kLogitechSystemControlReportID, keys};
+}
+
+
+static Packet
+logitech_vendor_packet()
+{
+	return Packet{kLogitechVendorReportID, 0};
 }
 
 
@@ -463,6 +534,111 @@ button_value_outside_its_range_counts_as_released()
 }
 
 
+static void
+logitech_packet_reports_buttons_movement_and_wheel_together()
+{
+	MouseFixture mouse(kLogitechReceiverDescriptor,
+		sizeof(kLogitechReceiverDescriptor));
+
+	Reception reception = mouse.Receive(
+		logitech_mouse_packet(kLeftButton, 10, -3, 1, 0));
+
+	CHECK_TRUE(reception.producedMovement);
+	CHECK_EQUAL(kLeftButton, reception.movement.buttons);
+	CHECK_EQUAL(10, reception.movement.xdelta);
+	CHECK_EQUAL(3, reception.movement.ydelta);
+	CHECK_EQUAL(-1, reception.movement.wheel_ydelta);
+	CHECK_EQUAL(0, reception.movement.wheel_xdelta);
+}
+
+
+static void
+logitech_pan_is_reported()
+{
+	MouseFixture mouse(kLogitechReceiverDescriptor,
+		sizeof(kLogitechReceiverDescriptor));
+
+	Reception reception = mouse.Receive(logitech_mouse_packet(0, 0, 0, 0, -1));
+
+	CHECK_EQUAL(-1, reception.movement.wheel_xdelta);
+}
+
+
+static void
+logitech_middle_and_eighth_button_are_reported()
+{
+	MouseFixture mouse(kLogitechReceiverDescriptor,
+		sizeof(kLogitechReceiverDescriptor));
+
+	Reception middle = mouse.Receive(
+		logitech_mouse_packet(kMiddleButton, 0, 0));
+	CHECK_EQUAL(kMiddleButton, middle.movement.buttons);
+
+	Reception both = mouse.Receive(logitech_mouse_packet(
+		kMiddleButton | kEighthButton, 0, 0));
+	CHECK_EQUAL(kMiddleButton | kEighthButton, both.movement.buttons);
+}
+
+
+static void
+logitech_consumer_packet_produces_no_movement()
+{
+	MouseFixture mouse(kLogitechReceiverDescriptor,
+		sizeof(kLogitechReceiverDescriptor));
+	mouse.Receive(logitech_mouse_packet(kLeftButton, 0, 0));
+
+	// Volume up (0x00e9) and then the release of the key.
+	Reception pressed = mouse.Receive(logitech_consumer_packet(0x00e9));
+	Reception released = mouse.Receive(logitech_consumer_packet(0));
+
+	CHECK_TRUE(!pressed.producedMovement);
+	CHECK_TRUE(!released.producedMovement);
+}
+
+
+static void
+logitech_consumer_packet_with_pan_usage_does_not_scroll()
+{
+	// 0x0238 is the pan usage. As a key of the consumer array it must not be
+	// taken for the pan axis of the mouse.
+	MouseFixture mouse(kLogitechReceiverDescriptor,
+		sizeof(kLogitechReceiverDescriptor));
+
+	Reception reception = mouse.Receive(logitech_consumer_packet(0x0238));
+
+	CHECK_TRUE(!reception.producedMovement);
+}
+
+
+static void
+logitech_system_control_and_vendor_packets_produce_no_movement()
+{
+	MouseFixture mouse(kLogitechReceiverDescriptor,
+		sizeof(kLogitechReceiverDescriptor));
+
+	CHECK_TRUE(!mouse.Receive(logitech_system_control_packet(0x01))
+		.producedMovement);
+	CHECK_TRUE(!mouse.Receive(logitech_vendor_packet()).producedMovement);
+}
+
+
+static void
+logitech_button_stays_pressed_across_other_reports()
+{
+	MouseFixture mouse(kLogitechReceiverDescriptor,
+		sizeof(kLogitechReceiverDescriptor));
+	mouse.Receive(logitech_mouse_packet(kLeftButton, 0, 0));
+	mouse.Receive(logitech_consumer_packet(0x00e9));
+	mouse.Receive(logitech_system_control_packet(0x01));
+
+	Reception reception = mouse.Receive(
+		logitech_mouse_packet(kLeftButton, 5, 0));
+
+	CHECK_EQUAL(kLeftButton, reception.movement.buttons);
+	CHECK_EQUAL(5, reception.movement.xdelta);
+}
+
+
 int
 main()
 {
@@ -488,6 +664,15 @@ main()
 
 	printf("mouse buttons with values outside their range\n");
 	RUN_TEST(button_value_outside_its_range_counts_as_released);
+
+	printf("mouse with everything in one report, plus other collections\n");
+	RUN_TEST(logitech_packet_reports_buttons_movement_and_wheel_together);
+	RUN_TEST(logitech_pan_is_reported);
+	RUN_TEST(logitech_middle_and_eighth_button_are_reported);
+	RUN_TEST(logitech_consumer_packet_produces_no_movement);
+	RUN_TEST(logitech_consumer_packet_with_pan_usage_does_not_scroll);
+	RUN_TEST(logitech_system_control_and_vendor_packets_produce_no_movement);
+	RUN_TEST(logitech_button_stays_pressed_across_other_reports);
 
 	printf("\n%d passed, %d failed\n", sPassedTests, sFailedTests);
 	return sFailedTests == 0 ? 0 : 1;
