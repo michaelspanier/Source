@@ -52,6 +52,20 @@ usbvc_guid kYUY2Guid = {0x59, 0x55, 0x59, 0x32, 0x00, 0x00, 0x10, 0x00, 0x80,
 usbvc_guid kNV12Guid = {0x4e, 0x56, 0x31, 0x32, 0x00, 0x00, 0x10, 0x00, 0x80,
 	0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71};
 
+// The formats whose frames the device can show.
+enum {
+	kFormatNone = 0,
+	kFormatYUY2,
+	kFormatMJPEG
+};
+
+// A frame descriptor up to and including bFrameIntervalType.
+static const size_t kFrameDescriptorLength = 26;
+static const size_t kContinuousIntervalsLength = 12;
+static const size_t kUncompressedFormatLength = 27;
+static const size_t kMJPEGFormatLength = 11;
+
+
 static void
 print_guid(const usbvc_guid guid)
 {
@@ -72,9 +86,11 @@ UVCCamDevice::UVCCamDevice(CamDeviceAddon& _addon, BUSBDevice* _device)
 	: CamDevice(_addon, _device),
 	fHeaderDescriptor(NULL),
 	fInterruptIn(NULL),
-	fUncompressedFormatIndex(1),
-	fUncompressedFrameIndex(1)
+	fParsedFormatIndex(0),
+	fParsedFormat(kFormatNone)
 {
+	uvc_frame_list_init(&fFrames);
+	memset(&fFrame, 0, sizeof(fFrame));
 	fControlRequestIndex = 0;
 	fCameraRequestIndex = 0;
 	fCameraControls = 0;
@@ -215,7 +231,13 @@ UVCCamDevice::_ParseVideoStreaming(const usbvc_class_descriptor* _descriptor,
 		{
 			const usbvc_format_descriptor* descriptor
 				= (const usbvc_format_descriptor*)_descriptor;
-			fUncompressedFormatIndex = descriptor->formatIndex;
+			if (len < kUncompressedFormatLength) {
+				fParsedFormat = kFormatNone;
+				break;
+			}
+			fParsedFormatIndex = descriptor->formatIndex;
+			fParsedFormat = memcmp(descriptor->uncompressed.format, kYUY2Guid,
+				sizeof(usbvc_guid)) == 0 ? kFormatYUY2 : kFormatNone;
 			printf("VS_FORMAT_UNCOMPRESSED:\tbFormatIdx=%d,#frmdesc=%d,guid=",
 				descriptor->formatIndex, descriptor->numFrameDescriptors);
 			print_guid(descriptor->uncompressed.format);
@@ -247,14 +269,13 @@ UVCCamDevice::_ParseVideoStreaming(const usbvc_class_descriptor* _descriptor,
 		{
 			const usb_video_frame_descriptor* descriptor
 				= (const usb_video_frame_descriptor*)_descriptor;
-			if (_descriptor->descriptorSubtype == USB_VIDEO_VS_FRAME_UNCOMPRESSED) {
-				printf("VS_FRAME_UNCOMPRESSED:");
-				fUncompressedFrames.AddItem(
-					new usb_video_frame_descriptor(*descriptor));
-			} else {
-				printf("VS_FRAME_MJPEG:");
-				fMJPEGFrames.AddItem(new usb_video_frame_descriptor(*descriptor));
-			}
+			if (len < kFrameDescriptorLength)
+				break;
+			const bool compressed
+				= _descriptor->descriptorSubtype == USB_VIDEO_VS_FRAME_MJPEG;
+			printf("%s", compressed ? "VS_FRAME_MJPEG:" : "VS_FRAME_UNCOMPRESSED:");
+			if (fParsedFormat == (compressed ? kFormatMJPEG : kFormatYUY2))
+				_AddFrame(*descriptor, compressed);
 			printf("\tbFrameIdx=%d,stillsupported=%s,"
 				"fixedframerate=%s\n", descriptor->frame_index,
 				(descriptor->capabilities & 1) ? "yes" : "no",
@@ -265,12 +286,15 @@ UVCCamDevice::_ParseVideoStreaming(const usbvc_class_descriptor* _descriptor,
 				descriptor->max_video_frame_buffer_size);
 			printf("\tdefault frame interval: %" B_PRIu32 ", #intervals(0=cont): %d\n",
 				descriptor->default_frame_interval, descriptor->frame_interval_type);
-			if (descriptor->frame_interval_type == 0) {
+			if (descriptor->frame_interval_type == 0
+				&& len >= kFrameDescriptorLength + kContinuousIntervalsLength) {
 				printf("min/max frame interval=%" B_PRIu32 "/%" B_PRIu32 ", step=%" B_PRIu32 "\n",
 					descriptor->continuous.min_frame_interval,
 					descriptor->continuous.max_frame_interval,
 					descriptor->continuous.frame_interval_step);
-			} else for (uint8 i = 0; i < descriptor->frame_interval_type; i++) {
+			} else for (uint8 i = 0; i < descriptor->frame_interval_type
+				&& kFrameDescriptorLength + (i + 1) * sizeof(uint32) <= len;
+				i++) {
 				printf("\tdiscrete frame interval: %" B_PRIu32 "\n",
 					descriptor->discrete_frame_intervals[i]);
 			}
@@ -360,7 +384,12 @@ UVCCamDevice::_ParseVideoStreaming(const usbvc_class_descriptor* _descriptor,
 		{
 			const usbvc_format_descriptor* descriptor
 				= (const usbvc_format_descriptor*)_descriptor;
-			fMJPEGFormatIndex = descriptor->formatIndex;
+			if (len < kMJPEGFormatLength) {
+				fParsedFormat = kFormatNone;
+				break;
+			}
+			fParsedFormatIndex = descriptor->formatIndex;
+			fParsedFormat = kFormatMJPEG;
 			printf("VS_FORMAT_MJPEG:\tbFormatIdx=%d,#frmdesc=%d\n",
 				descriptor->formatIndex, descriptor->numFrameDescriptors);
 			printf("\t#flgs=%d,optfrmidx=%d,aspRX=%d,aspRY=%d\n",
@@ -581,6 +610,8 @@ UVCCamDevice::SupportsIsochronous()
 status_t
 UVCCamDevice::StartTransfer()
 {
+	if (fFrame.compressed && !fJpegDecoder.InitCheck())
+		return B_NO_MEMORY;
 	if (_ProbeCommitFormat() != B_OK)
 		return B_ERROR;
 	status_t status = _ResetDeframer();
@@ -613,14 +644,14 @@ UVCCamDevice::SuggestVideoFrame(uint32& width, uint32& height)
 	printf("UVCCamDevice::SuggestVideoFrame(%" B_PRIu32 ", %" B_PRIu32 ")\n", width, height);
 	// 640x480 is a size every UVC camera offers and 30 frames per second fit
 	// the bandwidth of a high speed endpoint. If the camera does not have it,
-	// take the first size it advertises.
+	// take the smallest size it offers.
 	width = 640;
 	height = 480;
 	if (AcceptVideoFrame(width, height) != B_OK) {
-		const usb_video_frame_descriptor* descriptor
-			= (const usb_video_frame_descriptor*)fUncompressedFrames.FirstItem();
-		width  = (*descriptor).width;
-		height = (*descriptor).height;
+		if (fFrames.count == 0)
+			return B_ERROR;
+		width = fFrames.frames[0].width;
+		height = fFrames.frames[0].height;
 	}
 	return B_OK;
 }
@@ -646,16 +677,11 @@ UVCCamDevice::AcceptVideoFrame(uint32& width, uint32& height)
 		height = 480;
 	}
 
-	for (int i = 0; i<fUncompressedFrames.CountItems(); i++) {
-		const usb_video_frame_descriptor* descriptor
-			= (const usb_video_frame_descriptor*)fUncompressedFrames.ItemAt(i);
-		if ((*descriptor).width == width && (*descriptor).height == height) {
-			// The probe request wants the descriptor's own frame index, which
-			// starts at 1, not the position in our list.
-			fUncompressedFrameIndex = descriptor->frame_index;
-			SetVideoFrame(BRect(0, 0, width - 1, height - 1));
-			return B_OK;
-		}
+	const uvc_frame* frame = uvc_frame_list_find(&fFrames, width, height);
+	if (frame != NULL) {
+		fFrame = *frame;
+		SetVideoFrame(BRect(0, 0, width - 1, height - 1));
+		return B_OK;
 	}
 
 	fprintf(stderr, "UVCCamDevice::AcceptVideoFrame() Invalid frame dimensions"
@@ -667,22 +693,21 @@ UVCCamDevice::AcceptVideoFrame(uint32& width, uint32& height)
 int32
 UVCCamDevice::CountVideoSizes() const
 {
-	return fUncompressedFrames.CountItems();
+	return fFrames.count;
 }
 
 
 bool
-UVCCamDevice::VideoSizeAt(int32 index, uint32& width, uint32& height,
-	uint32& interval) const
+UVCCamDevice::VideoSizeAt(int32 index, cam_video_size& size) const
 {
-	const usb_video_frame_descriptor* descriptor
-		= (const usb_video_frame_descriptor*)fUncompressedFrames.ItemAt(index);
-	if (descriptor == NULL)
+	if (index < 0 || index >= fFrames.count)
 		return false;
 
-	width = descriptor->width;
-	height = descriptor->height;
-	interval = descriptor->default_frame_interval;
+	const uvc_frame& frame = fFrames.frames[index];
+	size.width = frame.width;
+	size.height = frame.height;
+	size.interval = frame.interval;
+	size.format = frame.compressed ? "MJPEG" : "uncompressed";
 	return true;
 }
 
@@ -726,8 +751,8 @@ UVCCamDevice::_ProbeCommitFormat()
 	memset(&request, 0, sizeof(request));
 	request._hint.frame_interval = 1;
 	request.frame_interval = _DefaultFrameInterval();
-	request.format_index = fUncompressedFormatIndex;
-	request.frame_index = fUncompressedFrameIndex;
+	request.format_index = fFrame.formatIndex;
+	request.frame_index = fFrame.frameIndex;
 	size_t length = fHeaderDescriptor->version > 0x100 ? 34 : 26;
 	size_t actualLength = fDevice->ControlTransfer(
 		USB_REQTYPE_CLASS | USB_REQTYPE_INTERFACE_OUT, USB_VIDEO_RC_SET_CUR,
@@ -857,13 +882,7 @@ uint32
 UVCCamDevice::_DefaultFrameInterval() const
 {
 	const uint32 kThirtyFramesPerSecond = 333333;
-	for (int32 i = 0; i < fUncompressedFrames.CountItems(); i++) {
-		const usb_video_frame_descriptor* descriptor
-			= (const usb_video_frame_descriptor*)fUncompressedFrames.ItemAt(i);
-		if (descriptor->frame_index == fUncompressedFrameIndex)
-			return descriptor->default_frame_interval;
-	}
-	return kThirtyFramesPerSecond;
+	return fFrame.interval != 0 ? fFrame.interval : kThirtyFramesPerSecond;
 }
 
 
@@ -1377,23 +1396,56 @@ UVCCamDevice::FillFrameBuffer(BBuffer* buffer, bigtime_t* stamp)
 		return err;
 	}
 
-	int32 width = VideoFrame().IntegerWidth() + 1;
-	int32 height = VideoFrame().IntegerHeight() + 1;
-
-	// A frame that is shorter than the format promises was damaged on the way.
-	// It is not shown at all; an empty buffer would flash black.
-	err = B_BAD_DATA;
-	if (uvc_yuy2_frame_fits(f->BufferLength(), buffer->SizeAvailable(),
-			width, height)) {
-		// TODO: The Video Producer only outputs B_RGB32.  This is OK for most
-		// applications.  This could be leveraged if applications can
-		// consume B_YUV422.
-		uvc_decode_yuy2((uint8*)buffer->Data(), (const uint8*)f->Buffer(),
-			width, height);
-		err = B_OK;
-	}
+	uvc_picture picture;
+	picture.bits = (uint8*)buffer->Data();
+	picture.size = buffer->SizeAvailable();
+	picture.width = VideoFrame().IntegerWidth() + 1;
+	picture.height = VideoFrame().IntegerHeight() + 1;
+	err = _Decode(*f, picture);
 	delete f;
 	return err;
+}
+
+
+/*!	Converts a frame into the B_RGB32 picture. A damaged frame, one that is
+	shorter than its format promises or that does not decode, is not shown at
+	all; an empty buffer would flash black.
+*/
+status_t
+UVCCamDevice::_Decode(const CamFrame& frame, const uvc_picture& picture)
+{
+	const uint8* data = (const uint8*)frame.Buffer();
+	if (fFrame.compressed) {
+		return fJpegDecoder.Decode(data, frame.BufferLength(), picture)
+			? B_OK : B_BAD_DATA;
+	}
+
+	if (!uvc_yuy2_frame_fits(frame.BufferLength(), picture.size,
+			picture.width, picture.height)) {
+		return B_BAD_DATA;
+	}
+	// TODO: The Video Producer only outputs B_RGB32.  This is OK for most
+	// applications.  This could be leveraged if applications can
+	// consume B_YUV422.
+	uvc_decode_yuy2(picture.bits, data, picture.width, picture.height);
+	return B_OK;
+}
+
+
+void
+UVCCamDevice::_AddFrame(const usb_video_frame_descriptor& descriptor,
+	bool compressed)
+{
+	uvc_frame frame;
+	frame.width = descriptor.width;
+	frame.height = descriptor.height;
+	frame.formatIndex = fParsedFormatIndex;
+	// The probe request wants the descriptor's own frame index, which
+	// starts at 1, not the position in our list.
+	frame.frameIndex = descriptor.frame_index;
+	frame.interval = descriptor.default_frame_interval;
+	frame.compressed = compressed;
+	uvc_frame_list_add(&fFrames, frame);
 }
 
 

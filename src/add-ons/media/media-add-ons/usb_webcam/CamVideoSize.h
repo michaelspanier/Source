@@ -71,19 +71,34 @@ cam_frames_per_second(uint32_t interval)
 }
 
 
-//!	Writes "1920 × 1080 (5 fps)", or without the rate if it is unknown.
+struct cam_video_size {
+			uint32_t			width;
+			uint32_t			height;
+			uint32_t			interval;
+				// 100 ns units, 0 if unknown
+			const char*			format;
+				// how the camera sends it, NULL if it does not matter
+};
+
+
+//!	Writes "1920 × 1080 (30 fps, MJPEG)", leaving out what is unknown.
 static inline void
-cam_size_label(char* buffer, size_t size, uint32_t width, uint32_t height,
-	uint32_t interval)
+cam_size_label(char* buffer, size_t bufferSize, const cam_video_size& size)
 {
-	uint32_t rate = cam_frames_per_second(interval);
-	if (rate == 0) {
-		snprintf(buffer, size, "%u \xc3\x97 %u", (unsigned)width,
-			(unsigned)height);
+	int length = snprintf(buffer, bufferSize, "%u \xc3\x97 %u",
+		(unsigned)size.width, (unsigned)size.height);
+	if (length < 0 || (size_t)length >= bufferSize)
 		return;
-	}
-	snprintf(buffer, size, "%u \xc3\x97 %u (%u fps)", (unsigned)width,
-		(unsigned)height, (unsigned)rate);
+
+	uint32_t rate = cam_frames_per_second(size.interval);
+	char* end = buffer + length;
+	size_t left = bufferSize - length;
+	if (rate != 0 && size.format != NULL)
+		snprintf(end, left, " (%u fps, %s)", (unsigned)rate, size.format);
+	else if (rate != 0)
+		snprintf(end, left, " (%u fps)", (unsigned)rate);
+	else if (size.format != NULL)
+		snprintf(end, left, " (%s)", size.format);
 }
 
 

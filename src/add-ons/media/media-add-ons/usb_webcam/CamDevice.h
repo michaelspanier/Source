@@ -6,6 +6,7 @@
 #define _CAM_DEVICE_H
 
 
+#include "CamVideoSize.h"
 #include <OS.h>
 #include <image.h>
 #ifdef __HAIKU__
@@ -66,8 +67,8 @@ class CamDevice {
 	virtual status_t	SuggestVideoFrame(uint32 &width, uint32 &height);
 	virtual status_t	AcceptVideoFrame(uint32 &width, uint32 &height);
 	virtual int32		CountVideoSizes() const;
-	virtual bool		VideoSizeAt(int32 index, uint32 &width, uint32 &height,
-							uint32 &interval) const;
+	virtual bool		VideoSizeAt(int32 index,
+							cam_video_size& size) const;
 	virtual status_t	SetVideoFrame(BRect rect);
 	virtual BRect		VideoFrame() const { return fVideoFrame; };
 	virtual status_t	SetScale(float scale);

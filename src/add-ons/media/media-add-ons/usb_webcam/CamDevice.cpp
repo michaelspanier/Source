@@ -227,8 +227,7 @@ CamDevice::CountVideoSizes() const
 	frame interval in 100 ns (0 if unknown).
 */
 bool
-CamDevice::VideoSizeAt(int32 index, uint32 &width, uint32 &height,
-	uint32 &interval) const
+CamDevice::VideoSizeAt(int32 index, cam_video_size& size) const
 {
 	return false;
 }
