@@ -9,4 +9,13 @@ SimpleTest UVCColorBenchmark : UVCColorBenchmark.cpp ;
 SimpleTest UVCColorTest : UVCColorTest.cpp ;
 SimpleTest UVCControlsTest : UVCControlsTest.cpp ;
 SimpleTest UVCFrameBufferTest : UVCFrameBufferTest.cpp ;
+SimpleTest UVCFrameListTest : UVCFrameListTest.cpp ;
 SimpleTest UVCPayloadTest : UVCPayloadTest.cpp ;
+
+SEARCH_SOURCE += [ FDirName $(HAIKU_TOP) src add-ons media media-add-ons
+	usb_webcam addons uvc ] ;
+UseBuildFeatureHeaders jpeg ;
+SimpleTest UVCJpegDecoderTest : UVCJpegDecoderTest.cpp UVCJpegDecoder.cpp
+	: [ BuildFeatureAttribute jpeg : library ] [ TargetLibstdc++ ] ;
+Includes [ FGristFiles UVCJpegDecoderTest.cpp UVCJpegDecoder.cpp ]
+	: [ BuildFeatureAttribute jpeg : headers ] ;
