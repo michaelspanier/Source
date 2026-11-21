@@ -9,6 +9,7 @@
 
 
 #include "CamDevice.h"
+#include "UVCControls.h"
 #include "USB_video.h"
 #include <usb/USB_video.h>
 
@@ -53,20 +54,24 @@ private:
 			uint32				_DefaultFrameInterval() const;
 			status_t			_SelectIdleAlternate();
 
-			void				_AddProcessingParameter(BParameterGroup* group,
-									int32 index,
-									const usb_video_processing_unit_descriptor*
-										descriptor);
-			float				_AddParameter(BParameterGroup* group,
-									BParameterGroup** subgroup, int32 index,
-									uint16 wValue, const char* name);
-			uint8 				_AddAutoParameter(BParameterGroup* subgroup,
-									int32 index, uint16 wValue);
-			status_t			_SetParameterValue(uint16 wValue,
-									int16 setValue);
-			status_t			_SetParameterValue(uint16 wValue,
-									int8 setValue);
-
+			void				_DefineControl(int32 parameter,
+									UVCControlKind kind, uint8 selector,
+									uint16 requestIndex, uint8 length,
+									int32 autoParameter);
+			void				_DefineControls();
+			bool				_ReadControl(const UVCControl& control,
+									uint8 request, uint8* data);
+			void				_LoadControl(int32 parameter);
+			void				_LoadWhiteBalanceComponent();
+			status_t			_WriteControl(int32 parameter);
+			void				_RefreshAutomaticValue(int32 parameter);
+			bool				_IsAutomaticSwitch(int32 parameter) const;
+			status_t			_WriteDependentValues(
+									int32 automaticParameter);
+			BParameterGroup*	_GroupFor(BParameterGroup* group,
+									BParameterGroup** groups, int32 parameter);
+			void				_MakeParameter(BParameterGroup* group,
+									int32 parameter);
 
 			usbvc_interface_header_descriptor *fHeaderDescriptor;
 
@@ -84,26 +89,10 @@ private:
 			BList				fUncompressedFrames;
 			BList				fMJPEGFrames;
 
-			float				fBrightness;
-			float				fContrast;
-			float				fHue;
-			float				fSaturation;
-			float				fSharpness;
-			float				fGamma;
-			float				fWBTemp;
-			float				fWBComponent;
-			float				fBacklightCompensation;
-			float				fGain;
-
-			bool				fBinaryBacklightCompensation;
-
-			int					fWBTempAuto;
-			int					fWBCompAuto;
-			int					fHueAuto;
-			int					fBacklightCompensationBinary;
-			int					fPowerlineFrequency;
-
-
+			uint16				fCameraRequestIndex;
+			uint8				fCameraControls;
+			uint8				fProcessingControls[2];
+			UVCControl			fControls[kUvcParameterCount];
 };
 
 
