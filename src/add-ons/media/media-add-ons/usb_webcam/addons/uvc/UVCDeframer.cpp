@@ -21,8 +21,7 @@ UVCDeframer::UVCDeframer(CamDevice* device)
 	: CamDeframer(device),
 	fFrameCount(0),
 	fID(0),
-	fSynced(false),
-	fFrameBroken(false)
+	fSynced(false)
 {
 	uvc_sof_order_reset(&fSOFOrder);
 }
@@ -51,13 +50,10 @@ UVCDeframer::Write(const void* buffer, size_t size)
 	// Swapped transfers show as a step back of the camera's SOF counter.
 	if (header.error
 		|| (header.hasSOF && !uvc_sof_in_order(&fSOFOrder, header.sof)))
-		fFrameBroken = true;
+		fBuffer.MarkBroken();
 
 	size_t payloadSize = size - header.length;
-	if (payloadSize > 0 && !fFrameBroken) {
-		fInputBuffer.WriteAt(fInputBuffer.BufferLength(), &buf[header.length],
-			payloadSize);
-	}
+	fBuffer.Append(&buf[header.length], payloadSize);
 
 	if (header.endOfFrame)
 		_FinishFrame();
@@ -73,19 +69,14 @@ UVCDeframer::Write(const void* buffer, size_t size)
 void
 UVCDeframer::_FinishFrame()
 {
-	size_t length = fInputBuffer.BufferLength();
-	const void* data = fInputBuffer.Buffer();
-
-	bool usable = uvc_frame_usable(length, fFrameBroken);
-	fFrameBroken = false;
-	if (!usable) {
-		fInputBuffer.SetSize(0);
+	if (!uvc_frame_usable(fBuffer.Length(), fBuffer.IsBroken())) {
+		fBuffer.Clear();
 		return;
 	}
 
 	if (!fSynced) {
 		fSynced = true;
-		fInputBuffer.SetSize(0);
+		fBuffer.Clear();
 		return;
 	}
 
@@ -100,14 +91,41 @@ UVCDeframer::_FinishFrame()
 
 	CamFrame* frame = AllocFrame();
 	if (frame == NULL) {
-		fInputBuffer.SetSize(0);
+		fBuffer.Clear();
 		return;
 	}
-	frame->Write(data, length);
+	frame->Write(fBuffer.Data(), fBuffer.Length());
 	fFrames.AddItem(frame);
 	fFrameCount++;
 	release_sem(fFrameSem);
-	fInputBuffer.SetSize(0);
+	fBuffer.Clear();
+}
+
+
+//!	Called like Write(), by one data pump at a time.
+void
+UVCDeframer::MarkFrameBroken()
+{
+	fBuffer.MarkBroken();
+}
+
+
+/*!	Starts a new stream: drops what is left of the last one and makes room
+	for frames of up to \a maxFrameSize bytes. The data pumps must not run.
+*/
+status_t
+UVCDeframer::Reset(size_t maxFrameSize)
+{
+	BAutolock l(fLocker);
+
+	while (fFrames.CountItems() > 0) {
+		delete (CamFrame*)fFrames.RemoveItem((int32)0);
+		acquire_sem_etc(fFrameSem, 1, B_RELATIVE_TIMEOUT, 0);
+	}
+	fID = 0;
+	fSynced = false;
+	uvc_sof_order_reset(&fSOFOrder);
+	return fBuffer.SetCapacity(maxFrameSize) ? B_OK : B_NO_MEMORY;
 }
 
 

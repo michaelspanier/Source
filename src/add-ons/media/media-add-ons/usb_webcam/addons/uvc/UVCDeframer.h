@@ -7,6 +7,7 @@
 
 
 #include "CamDeframer.h"
+#include "UVCFrameBuffer.h"
 #include "UVCPayload.h"
 
 #include <USB3.h>
@@ -20,6 +21,9 @@ public:
 					// write from usb transfers
 	virtual ssize_t				Write(const void *buffer, size_t size);
 
+			status_t			Reset(size_t maxFrameSize);
+			void				MarkFrameBroken();
+
 private:
 	void						_PrintBuffer(const void* buffer, size_t size);
 	void						_FinishFrame();
@@ -27,9 +31,8 @@ private:
 	int32						fFrameCount;
 	int32						fID;
 	bool						fSynced;
-	bool						fFrameBroken;
 	uvc_sof_order				fSOFOrder;
-	BMallocIO					fInputBuffer;
+	UVCFrameBuffer				fBuffer;
 };
 
 #endif /* _UVC_DEFRAMER_H */

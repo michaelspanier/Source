@@ -7,6 +7,7 @@
 
 
 #include "UVCCamDevice.h"
+#include "UVCColor.h"
 #include "UVCDeframer.h"
 
 #include <stdio.h>
@@ -82,6 +83,7 @@ UVCCamDevice::UVCCamDevice(CamDeviceAddon& _addon, BUSBDevice* _device)
 
 	generic = (usb_descriptor*)buffer;
 
+	bool streamingFound = false;
 	for (uint32 i = 0; i < _device->CountConfigurations(); i++) {
 		config = _device->ConfigurationAt(i);
 		if (config == NULL)
@@ -108,7 +110,7 @@ UVCCamDevice::UVCCamDevice(CamDeviceAddon& _addon, BUSBDevice* _device)
 						generic->generic.length);
 				}
 				for (uint32 k = 0; k < interface->CountEndpoints(); k++) {
-					const BUSBEndpoint* e = interface->EndpointAt(i);
+					const BUSBEndpoint* e = interface->EndpointAt(k);
 					if (e && e->IsInterrupt() && e->IsInput()) {
 						fInterruptIn = e;
 						break;
@@ -119,6 +121,19 @@ UVCCamDevice::UVCCamDevice(CamDeviceAddon& _addon, BUSBDevice* _device)
 				== USB_VIDEO_INTERFACE_VIDEOSTREAMING_SUBCLASS) {
 				printf("UVCCamDevice: (%" B_PRIu32 ",%" B_PRIu32 "): Found Video Streaming "
 					"interface.\n", i, j);
+
+				// Format and frame indices only hold within their interface,
+				// and the stream is set up on one. A second one, as of an
+				// infrared camera, is left alone.
+				if (streamingFound)
+					continue;
+				streamingFound = true;
+
+				// An earlier run may have left an alternate setting active,
+				// whose interface has no class specific descriptors. Parse
+				// and probe from the idle setting.
+				if (interface->ActiveAlternateIndex() != 0)
+					((BUSBInterface*)interface)->SetAlternate(0);
 
 				// look for class specific interface descriptors and parse them
 				for (uint32 k = 0; interface->OtherDescriptorAt(k, generic,
@@ -132,7 +147,7 @@ UVCCamDevice::UVCCamDevice(CamDeviceAddon& _addon, BUSBDevice* _device)
 				}
 
 				for (uint32 k = 0; k < interface->CountEndpoints(); k++) {
-					const BUSBEndpoint* e = interface->EndpointAt(i);
+					const BUSBEndpoint* e = interface->EndpointAt(k);
 					if (e && e->IsIsochronous() && e->IsInput()) {
 						fIsoIn = e;
 						break;
@@ -549,17 +564,29 @@ UVCCamDevice::SupportsIsochronous()
 status_t
 UVCCamDevice::StartTransfer()
 {
-	if (_ProbeCommitFormat() != B_OK || _SelectBestAlternate() != B_OK)
+	if (_ProbeCommitFormat() != B_OK)
 		return B_ERROR;
-	return CamDevice::StartTransfer();
+	status_t status = _ResetDeframer();
+	if (status != B_OK)
+		return status;
+	status = _SelectBestAlternate();
+	if (status == B_OK)
+		status = CamDevice::StartTransfer();
+	if (status != B_OK)
+		_SelectIdleAlternate();
+	return status;
 }
 
 
 status_t
 UVCCamDevice::StopTransfer()
 {
+	// The transfers in flight must finish while the camera still sends.
+	// Switching to the idle setting first leaves them waiting for data that
+	// never comes, and the data pumps cannot be joined.
+	status_t status = CamDevice::StopTransfer();
 	_SelectIdleAlternate();
-	return CamDevice::StopTransfer();
+	return status;
 }
 
 
@@ -567,12 +594,12 @@ status_t
 UVCCamDevice::SuggestVideoFrame(uint32& width, uint32& height)
 {
 	printf("UVCCamDevice::SuggestVideoFrame(%" B_PRIu32 ", %" B_PRIu32 ")\n", width, height);
-	// As in AcceptVideoFrame(), the suggestion should probably just be the
-	// first advertised uncompressed format, but current applications prefer
-	// 320x240, so this is tried first here as a suggestion.
-	width = 320;
-	height = 240;
-	if (!AcceptVideoFrame(width, height)) {
+	// 640x480 is a size every UVC camera offers and 30 frames per second fit
+	// the bandwidth of a high speed endpoint. If the camera does not have it,
+	// take the first size it advertises.
+	width = 640;
+	height = 480;
+	if (AcceptVideoFrame(width, height) != B_OK) {
 		const usb_video_frame_descriptor* descriptor
 			= (const usb_video_frame_descriptor*)fUncompressedFrames.FirstItem();
 		width  = (*descriptor).width;
@@ -598,15 +625,17 @@ UVCCamDevice::AcceptVideoFrame(uint32& width, uint32& height)
 		return B_OK;
 		*/
 
-		width  = 320;
-		height = 240;
+		width  = 640;
+		height = 480;
 	}
 
 	for (int i = 0; i<fUncompressedFrames.CountItems(); i++) {
 		const usb_video_frame_descriptor* descriptor
 			= (const usb_video_frame_descriptor*)fUncompressedFrames.ItemAt(i);
 		if ((*descriptor).width == width && (*descriptor).height == height) {
-			fUncompressedFrameIndex = i;
+			// The probe request wants the descriptor's own frame index, which
+			// starts at 1, not the position in our list.
+			fUncompressedFrameIndex = descriptor->frame_index;
 			SetVideoFrame(BRect(0, 0, width - 1, height - 1));
 			return B_OK;
 		}
@@ -615,6 +644,26 @@ UVCCamDevice::AcceptVideoFrame(uint32& width, uint32& height)
 	fprintf(stderr, "UVCCamDevice::AcceptVideoFrame() Invalid frame dimensions"
 		"\n");
 	return B_ERROR;
+}
+
+
+void
+UVCCamDevice::DataLost()
+{
+	static_cast<UVCDeframer*>(fDeframer)->MarkFrameBroken();
+}
+
+
+/*!	Sizes the deframer for the format just committed and drops what is
+	left of the last stream.
+*/
+status_t
+UVCCamDevice::_ResetDeframer()
+{
+	// fDeframer is the UVCDeframer made in the constructor.
+	UVCDeframer* deframer = static_cast<UVCDeframer*>(fDeframer);
+	return deframer->Reset(uvc_frame_buffer_size(fMaxVideoFrameSize,
+		VideoFrame().IntegerWidth() + 1, VideoFrame().IntegerHeight() + 1));
 }
 
 
@@ -636,7 +685,7 @@ UVCCamDevice::_ProbeCommitFormat()
 	usb_video_probe_and_commit_controls request;
 	memset(&request, 0, sizeof(request));
 	request._hint.frame_interval = 1;
-	request.frame_interval = 333333;
+	request.frame_interval = _DefaultFrameInterval();
 	request.format_index = fUncompressedFormatIndex;
 	request.frame_index = fUncompressedFrameIndex;
 	size_t length = fHeaderDescriptor->version > 0x100 ? 34 : 26;
@@ -670,6 +719,11 @@ UVCCamDevice::_ProbeCommitFormat()
 	actualLength = fDevice->ControlTransfer(
 		USB_REQTYPE_CLASS | USB_REQTYPE_INTERFACE_IN, USB_VIDEO_RC_GET_CUR,
 		USB_VIDEO_VS_PROBE_CONTROL << 8, fStreamingIndex, length, &response);
+	if (actualLength != length) {
+		fprintf(stderr, "UVCCamDevice::_ProbeFormat() GET_CUR ProbeControl"
+			" failed %ld\n", actualLength);
+		return B_ERROR;
+	}
 
 	/*
 	actualLength = fDevice->ControlTransfer(
@@ -684,7 +738,7 @@ UVCCamDevice::_ProbeCommitFormat()
 
 	actualLength = fDevice->ControlTransfer(
 		USB_REQTYPE_CLASS | USB_REQTYPE_INTERFACE_OUT, USB_VIDEO_RC_SET_CUR,
-		USB_VIDEO_VS_COMMIT_CONTROL << 8, fStreamingIndex, length, &request);
+		USB_VIDEO_VS_COMMIT_CONTROL << 8, fStreamingIndex, length, &response);
 	if (actualLength != length) {
 		fprintf(stderr, "UVCCamDevice::_ProbeFormat() SetCur CommitControl"
 			" failed\n");
@@ -722,12 +776,16 @@ UVCCamDevice::_SelectBestAlternate()
 			const BUSBEndpoint* endpoint = alternate->EndpointAt(j);
 			if (!endpoint->IsIsochronous() || !endpoint->IsInput())
 				continue;
-			if (fMaxPayloadTransferSize > endpoint->MaxPacketSize())
+			// Bits 0 to 10 are the packet size, bits 11 and 12 the number of
+			// additional transactions per interval.
+			uint32 packetSize = endpoint->MaxPacketSize();
+			uint32 bytesPerInterval = (packetSize & 0x7ff)
+				* (1 + ((packetSize >> 11) & 3));
+			if (fMaxPayloadTransferSize > bytesPerInterval)
 				continue;
-			if (bestBandwidth != 0
-				&& bestBandwidth < endpoint->MaxPacketSize())
+			if (bestBandwidth != 0 && bestBandwidth < bytesPerInterval)
 				continue;
-			bestBandwidth = endpoint->MaxPacketSize();
+			bestBandwidth = bytesPerInterval;
 			endpointIndex = j;
 			alternateIndex = i;
 		}
@@ -750,6 +808,24 @@ UVCCamDevice::_SelectBestAlternate()
 
 	return B_OK;
 }
+
+
+/*!	The frame interval the camera proposes for the chosen size, in 100 ns
+	units. Not every size runs at 30 frames per second.
+*/
+uint32
+UVCCamDevice::_DefaultFrameInterval() const
+{
+	const uint32 kThirtyFramesPerSecond = 333333;
+	for (int32 i = 0; i < fUncompressedFrames.CountItems(); i++) {
+		const usb_video_frame_descriptor* descriptor
+			= (const usb_video_frame_descriptor*)fUncompressedFrames.ItemAt(i);
+		if (descriptor->frame_index == fUncompressedFrameIndex)
+			return descriptor->default_frame_interval;
+	}
+	return kThirtyFramesPerSecond;
+}
+
 
 
 status_t
@@ -1245,7 +1321,6 @@ UVCCamDevice::_SetParameterValue(uint16 wValue, int8 setValue)
 status_t
 UVCCamDevice::FillFrameBuffer(BBuffer* buffer, bigtime_t* stamp)
 {
-	memset(buffer->Data(), 0, buffer->SizeAvailable());
 	status_t err = fDeframer->WaitFrame(2000000);
 	if (err < B_OK) {
 		fprintf(stderr, "WaitFrame: %" B_PRIx32 "\n", err);
@@ -1259,95 +1334,24 @@ UVCCamDevice::FillFrameBuffer(BBuffer* buffer, bigtime_t* stamp)
 		return err;
 	}
 
-	long int w = (long)(VideoFrame().right - VideoFrame().left + 1);
-	long int h = (long)(VideoFrame().bottom - VideoFrame().top + 1);
+	int32 width = VideoFrame().IntegerWidth() + 1;
+	int32 height = VideoFrame().IntegerHeight() + 1;
 
-	if (buffer->SizeAvailable() >= (size_t)w * h * 4) {
+	// A frame that is shorter than the format promises was damaged on the way.
+	// It is not shown at all; an empty buffer would flash black.
+	err = B_BAD_DATA;
+	if (uvc_yuy2_frame_fits(f->BufferLength(), buffer->SizeAvailable(),
+			width, height)) {
 		// TODO: The Video Producer only outputs B_RGB32.  This is OK for most
 		// applications.  This could be leveraged if applications can
 		// consume B_YUV422.
-		_DecodeColor((unsigned char*)buffer->Data(),
-			(unsigned char*)f->Buffer(), w, h);
+		uvc_decode_yuy2((uint8*)buffer->Data(), (const uint8*)f->Buffer(),
+			width, height);
+		err = B_OK;
 	}
 	delete f;
-	return B_OK;
+	return err;
 }
-
-
-void
-UVCCamDevice::_DecodeColor(unsigned char* dst, unsigned char* src,
-	int32 width, int32 height)
-{
-	long int i;
-	unsigned char* rawpt, * scanpt;
-	long int size;
-
-	rawpt = src;
-	scanpt = dst;
-	size = width*height;
-
-	for ( i = 0; i < size; i++ ) {
-	if ( (i/width) % 2 == 0 ) {
-		if ( (i % 2) == 0 ) {
-		/* B */
-		if ( (i > width) && ((i % width) > 0) ) {
-			*scanpt++ = (*(rawpt-width-1)+*(rawpt-width+1)
-				+ *(rawpt+width-1)+*(rawpt+width+1))/4;	/* R */
-			*scanpt++ = (*(rawpt-1)+*(rawpt+1)
-				+ *(rawpt+width)+*(rawpt-width))/4;	/* G */
-			*scanpt++ = *rawpt;					/* B */
-		} else {
-			/* first line or left column */
-			*scanpt++ = *(rawpt+width+1);		/* R */
-			*scanpt++ = (*(rawpt+1)+*(rawpt+width))/2;	/* G */
-			*scanpt++ = *rawpt;				/* B */
-		}
-		} else {
-		/* (B)G */
-		if ( (i > width) && ((i % width) < (width-1)) ) {
-			*scanpt++ = (*(rawpt+width)+*(rawpt-width))/2;	/* R */
-			*scanpt++ = *rawpt;					/* G */
-			*scanpt++ = (*(rawpt-1)+*(rawpt+1))/2;		/* B */
-		} else {
-			/* first line or right column */
-			*scanpt++ = *(rawpt+width);	/* R */
-			*scanpt++ = *rawpt;		/* G */
-			*scanpt++ = *(rawpt-1);	/* B */
-		}
-		}
-	} else {
-		if ( (i % 2) == 0 ) {
-		/* G(R) */
-		if ( (i < (width*(height-1))) && ((i % width) > 0) ) {
-			*scanpt++ = (*(rawpt-1)+*(rawpt+1))/2;		/* R */
-			*scanpt++ = *rawpt;					/* G */
-			*scanpt++ = (*(rawpt+width)+*(rawpt-width))/2;	/* B */
-		} else {
-			/* bottom line or left column */
-			*scanpt++ = *(rawpt+1);		/* R */
-			*scanpt++ = *rawpt;			/* G */
-			*scanpt++ = *(rawpt-width);		/* B */
-		}
-		} else {
-		/* R */
-		if ( i < (width*(height-1)) && ((i % width) < (width-1)) ) {
-			*scanpt++ = *rawpt;					/* R */
-			*scanpt++ = (*(rawpt-1)+*(rawpt+1)
-				+ *(rawpt-width)+*(rawpt+width))/4;	/* G */
-			*scanpt++ = (*(rawpt-width-1)+*(rawpt-width+1)
-				+ *(rawpt+width-1)+*(rawpt+width+1))/4;	/* B */
-		} else {
-			/* bottom line or right column */
-			*scanpt++ = *rawpt;				/* R */
-			*scanpt++ = (*(rawpt-1)+*(rawpt-width))/2;	/* G */
-			*scanpt++ = *(rawpt-width-1);		/* B */
-		}
-		}
-	}
-	rawpt++;
-	}
-}
-
 
 
 

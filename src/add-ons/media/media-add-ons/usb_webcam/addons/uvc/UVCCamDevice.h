@@ -37,6 +37,7 @@ public:
 									bigtime_t *stamp = NULL);
 
 private:
+	virtual void				DataLost();
 			void				_ParseVideoControl(
 									const usbvc_class_descriptor* descriptor,
 									size_t len);
@@ -45,10 +46,9 @@ private:
 									size_t len);
 			status_t			_ProbeCommitFormat();
 			status_t			_SelectBestAlternate();
+			status_t			_ResetDeframer();
+			uint32				_DefaultFrameInterval() const;
 			status_t			_SelectIdleAlternate();
-			void 				_DecodeColor(unsigned char *dst,
-									unsigned char *src, int32 width,
-									int32 height);
 
 			void				_AddProcessingParameter(BParameterGroup* group,
 									int32 index,

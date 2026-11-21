@@ -41,6 +41,8 @@ typedef struct {
 } usb_webcam_support_descriptor;
 
 // This class represents each webcam
+struct iso_transfer;
+
 class CamDevice {
 	public: 
 						CamDevice(CamDeviceAddon &_addon, BUSBDevice* _device);
@@ -125,6 +127,7 @@ class CamDevice {
 	virtual status_t	SendCommand(uint8 dir, uint8 request, uint16 value,
 									uint16 index, uint16 length, void* data);
 	virtual status_t	ProbeSensor();
+	virtual void		DataLost();
 	CamSensor			*CreateSensor(const char *name);
 		status_t		fInitStatus;
 		flavor_info		fFlavorInfo;
@@ -148,10 +151,21 @@ class CamDevice {
 		bool			fTransferEnabled;
 		thread_id		fPumpThread;
 		BLocker			fLocker;
+		BLocker			fIsoOrder;
 		uint8			*fBuffer;
 		size_t			fBufferLen;
 		BRect			fVideoFrame;
 		int fDumpFD;
+
+	private:
+		status_t		_IsoPump();
+	static int32		_IsoPumpThread(void *_this);
+		int64			_TakeIsoTicket();
+		void			_DeliverIsoTransfer(int64 ticket,
+							const iso_transfer& transfer);
+		bool			_WaitIsoTurn(int64 ticket);
+		int64			fIsoQueued;
+		int64			fIsoDelivered;
 };
 
 // the addon itself, that instanciate

@@ -29,7 +29,7 @@
 #define SINGLE_PARAMETER_GROUP 1
 
 // CodyCam and eXposer prefer 320x240
-#define FORCE_320_240 1
+//#define FORCE_320_240 1
 //#define FORCE_160_120 1
 //#define FORCE_MAX_FRAME 1
 
@@ -47,7 +47,7 @@
 
 //#define FIELD_RATE 30.f
 //#define FIELD_RATE 29.97f
-#define FIELD_RATE 5.f
+#define FIELD_RATE 30.f
 
 
 int32 VideoProducer::fInstances = 0;
@@ -503,6 +503,15 @@ VideoProducer::PrepareToConnect(const media_source &source,
 		format->u.raw_video.display.line_count = 240;
 	}
 #endif
+	// Without a wish from the application, the device says what it prefers.
+	if (fCamDevice != NULL && (format->u.raw_video.display.line_width == 0
+			|| format->u.raw_video.display.line_count == 0)) {
+		uint32 width, height;
+		if (fCamDevice->SuggestVideoFrame(width, height) == B_OK) {
+			format->u.raw_video.display.line_width = width;
+			format->u.raw_video.display.line_count = height;
+		}
+	}
 #ifdef FORCE_160_120
 	{
 		format->u.raw_video.display.line_width = 160;
@@ -801,21 +810,32 @@ VideoProducer::HandleStart(bigtime_t performance_time)
 	if (fFrameSync < B_OK)
 		goto err1;
 
+	{
+		BAutolock lock(fCamDevice->Locker());
+		status_t status = fCamDevice->StartTransfer();
+		if (status != B_OK) {
+			PRINTF(-1, ("HandleStart: The camera does not start: %s\n",
+				strerror(status)));
+			ReportError(B_NODE_FAILED_START);
+			goto err2;
+		}
+	}
+
 	fThread = spawn_thread(_frame_generator_, "frame generator",
 			B_NORMAL_PRIORITY, this);
 	if (fThread < B_OK)
-		goto err2;
+		goto err3;
 
 	resume_thread(fThread);
-
-	{
-		BAutolock lock(fCamDevice->Locker());
-		fCamDevice->StartTransfer();
-	}
 
 	fRunning = true;
 	return;
 
+err3:
+	{
+		BAutolock lock(fCamDevice->Locker());
+		fCamDevice->StopTransfer();
+	}
 err2:
 	delete_sem(fFrameSync);
 err1:
@@ -990,8 +1010,11 @@ VideoProducer::FrameGenerator()
 //#ifdef UseFillFrameBuffer
 		err = fCamDevice->FillFrameBuffer(buffer, &stamp);
 		if (err < B_OK) {
-			;//XXX handle error
+			// No picture arrived: send nothing instead of an empty buffer,
+			// the application shows that it is waiting.
 			fStats[0].missed++;
+			buffer->Recycle();
+			continue;
 		}
 //#endif
 #ifdef UseGetFrameBitmap
