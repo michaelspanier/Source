@@ -45,6 +45,7 @@ CamDevice::CamDevice(CamDeviceAddon &_addon, BUSBDevice* _device)
 	  fSupportedDeviceIndex(-1),
 	  fChipIsBigEndian(false),
 	  fTransferEnabled(false),
+	  fPumpThread(-1),
 	  fLocker("WebcamDeviceLock"),
 	  fIsoQueued(0),
 	  fIsoDelivered(0)
@@ -115,7 +116,12 @@ CamDevice::GetDevice()
 void
 CamDevice::Unplugged()
 {
+	// The BUSBDevice and its endpoints are deleted after this call. Without
+	// the device nothing new starts; the data pumps use the endpoints until
+	// they end.
+	BAutolock lock(fLocker);
 	fDevice = NULL;
+	StopDataPumps();
 	fBulkIn = NULL;
 	fIsoIn = NULL;
 }
@@ -167,6 +173,8 @@ CamDevice::StartTransfer()
 	PRINT((CH "()" CT));
 	if (fTransferEnabled)
 		return EALREADY;
+	if (!IsPlugged())
+		return B_DEV_NOT_READY;
 	fPumpThread = spawn_thread(_DataPumpThread, "USB Webcam Data Pump", 50,
 		this);
 	if (fPumpThread < B_OK)
@@ -193,14 +201,31 @@ CamDevice::StopTransfer()
 		err = fSensor->StopTransfer();
 	if (err < B_OK)
 		return err;
-	fTransferEnabled = false;
+	StopDataPumps();
+	return B_OK;
+}
 
-	// the thread itself might Lock()
+
+/*!	Ends the data pumps and waits for them. The caller holds fLocker once.
+	Unplugged() and StopTransfer() may both wait, so the thread is not
+	forgotten before it has ended.
+*/
+void
+CamDevice::StopDataPumps()
+{
+	fTransferEnabled = false;
+	const thread_id pump = fPumpThread;
+	if (pump < 0)
+		return;
+
+	// The bulk pump locks fLocker for every transfer.
 	fLocker.Unlock();
-	wait_for_thread(fPumpThread, &err);
+	status_t result;
+	wait_for_thread(pump, &result);
 	fLocker.Lock();
 
-	return B_OK;
+	if (fPumpThread == pump)
+		fPumpThread = -1;
 }
 
 

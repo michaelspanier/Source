@@ -37,6 +37,12 @@ measure(int width, int height)
 	size_t outSize = (size_t)width * height * 4;
 	uint8_t* in = (uint8_t*)malloc(inSize);
 	uint8_t* out = (uint8_t*)malloc(outSize);
+	if (in == NULL || out == NULL) {
+		fprintf(stderr, "not enough memory for %dx%d\n", width, height);
+		free(in);
+		free(out);
+		return;
+	}
 	for (size_t i = 0; i < inSize; i++)
 		in[i] = (uint8_t)(i * 37 + 11);
 

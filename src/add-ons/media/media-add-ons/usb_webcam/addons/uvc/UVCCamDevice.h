@@ -28,6 +28,7 @@ public:
 	virtual bool				SupportsIsochronous();
 	virtual status_t			StartTransfer();
 	virtual status_t			StopTransfer();
+	virtual	void				Unplugged();
 	virtual status_t			SuggestVideoFrame(uint32 &width,
 									uint32 &height);
 	virtual status_t			AcceptVideoFrame(uint32 &width,
@@ -63,6 +64,9 @@ private:
 			status_t			_ResetDeframer();
 			uint32				_DefaultFrameInterval() const;
 			status_t			_SelectIdleAlternate();
+			void				_StartIdleSwitch();
+			void				_WaitForIdleSwitch();
+	static	status_t			_IdleSwitchThread(void* data);
 
 			void				_DefineControl(int32 parameter,
 									UVCControlKind kind, uint8 selector,
@@ -102,6 +106,8 @@ private:
 			uint8				fCameraControls;
 			uint8				fProcessingControls[2];
 			UVCControl			fControls[kUvcParameterCount];
+
+			thread_id			fIdleThread;
 };
 
 

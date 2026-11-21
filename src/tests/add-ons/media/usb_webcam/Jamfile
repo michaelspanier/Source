@@ -4,6 +4,7 @@ SubDirHdrs $(HAIKU_TOP) src add-ons media media-add-ons usb_webcam ;
 SubDirHdrs $(HAIKU_TOP) src add-ons media media-add-ons usb_webcam addons uvc ;
 
 SimpleTest CamDeviceNameTest : CamDeviceNameTest.cpp ;
+SimpleTest CamReplugTest : CamReplugTest.cpp ;
 SimpleTest CamVideoSizeTest : CamVideoSizeTest.cpp ;
 SimpleTest UVCColorBenchmark : UVCColorBenchmark.cpp ;
 SimpleTest UVCColorTest : UVCColorTest.cpp ;

@@ -19,6 +19,8 @@
 
 WebCamMediaAddOn::WebCamMediaAddOn(image_id imid)
 	: BMediaAddOn(imid),
+	fNodeLock("webcam node"),
+	fNode(NULL),
 	fInitStatus(B_NO_INIT),
 	fRoster(NULL)
 {
@@ -150,6 +152,10 @@ WebCamMediaAddOn::InstantiateNodeFor(
 		node = NULL;
 	}
 
+	if (node != NULL) {
+		BAutolock lock(fNodeLock);
+		fNode = node;
+	}
 	return node;
 }
 
@@ -158,6 +164,13 @@ status_t
 WebCamMediaAddOn::CameraAdded(CamDevice* device)
 {
 	PRINT((CH "()" CT));
+	{
+		// The node may have lost its camera, and this may be that camera
+		// plugged in again.
+		BAutolock lock(fNodeLock);
+		if (fNode != NULL)
+			fNode->CameraPluggedIn();
+	}
 	NotifyFlavorChange();
 	return B_OK;
 }
@@ -169,6 +182,32 @@ WebCamMediaAddOn::CameraRemoved(CamDevice* device)
 	PRINT((CH "()" CT));
 	NotifyFlavorChange();
 	return B_OK;
+}
+
+
+void
+WebCamMediaAddOn::NodeDeleted(VideoProducer* node)
+{
+	BAutolock lock(fNodeLock);
+	if (fNode == node)
+		fNode = NULL;
+}
+
+
+CamDevice*
+WebCamMediaAddOn::PluggedCameraNamed(const char* name)
+{
+	CamDevice* found = NULL;
+	fRoster->Lock();
+	for (uint32 i = 0; i < fRoster->CountCameras() && found == NULL; i++) {
+		CamDevice* camera = fRoster->CameraAt(i);
+		if (camera != NULL && camera->IsPlugged()
+			&& strcmp(camera->FlavorInfo()->name, name) == 0) {
+			found = camera;
+		}
+	}
+	fRoster->Unlock();
+	return found;
 }
 
 
