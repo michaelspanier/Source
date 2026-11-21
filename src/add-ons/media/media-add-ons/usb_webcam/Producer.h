@@ -32,6 +32,9 @@ virtual					~VideoProducer();
 
 virtual	status_t		InitCheck() const { return fInitStatus; }
 
+		// May be called from any thread; does not block.
+		void				CameraPluggedIn();
+
 
 /* BMediaNode */
 public:
@@ -122,6 +125,7 @@ private:
 		status_t			_GetResolution(bigtime_t* lastChange, void* value,
 								size_t* size);
 		status_t			_SetResolution(const void* value, size_t size);
+		void				_TakeCameraBack();
 
 static	int32				fInstances;
 

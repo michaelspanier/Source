@@ -22,7 +22,9 @@
 //XXX: change interface
 #include <interface/Bitmap.h>
 
+#include "AddOn.h"
 #include "CamDevice.h"
+#include "CamReplug.h"
 #include "CamVideoSize.h"
 #include "CamSensor.h"
 
@@ -49,6 +51,11 @@
 //#define FIELD_RATE 30.f
 //#define FIELD_RATE 29.97f
 #define FIELD_RATE 30.f
+
+// Sent to the control thread of the node by its own threads. Anyone may
+// write to the control port: the messages carry nothing to trust.
+static const int32 kMsgConsumerGone = 'Cgon';
+static const int32 kMsgCameraPluggedIn = 'Cplg';
 
 
 int32 VideoProducer::fInstances = 0;
@@ -99,6 +106,8 @@ VideoProducer::VideoProducer(
 VideoProducer::~VideoProducer()
 {
 	if (fInitStatus == B_OK) {
+		static_cast<WebCamMediaAddOn*>(fAddOn)->NodeDeleted(this);
+
 		/* Clean up after ourselves, in case the application didn't make us
 		 * do so. */
 		if (fConnected)
@@ -128,9 +137,32 @@ VideoProducer::AddOn(int32 *internal_id) const
 }
 
 
-status_t
-VideoProducer::HandleMessage(int32 /*message*/, const void* /*data*/, size_t /*size*/)
+void
+VideoProducer::CameraPluggedIn()
 {
+	// The control thread takes the camera: it is the one that starts and
+	// stops the stream.
+	write_port_etc(ControlPort(), kMsgCameraPluggedIn, NULL, 0,
+		B_RELATIVE_TIMEOUT, 0);
+}
+
+
+status_t
+VideoProducer::HandleMessage(int32 message, const void* /*data*/, size_t /*size*/)
+{
+	switch (message) {
+		case kMsgConsumerGone:
+			// The application of the consumer has died without
+			// disconnecting, and nobody else tells us. Free the camera for
+			// the next application.
+			if (fConnected)
+				Disconnect(fOutput.source, fOutput.destination);
+			return B_OK;
+
+		case kMsgCameraPluggedIn:
+			_TakeCameraBack();
+			return B_OK;
+	}
 	return B_ERROR;
 }
 
@@ -168,6 +200,12 @@ VideoProducer::NodeRegistered()
 		ReportError(B_NODE_IN_DISTRESS);
 		return;
 	}
+
+	// Create the time source object while the media server is still there.
+	// BMediaEventLooper::ControlLoop() uses TimeSource() without a NULL check;
+	// created only at shutdown, when the add-on server stops the node after
+	// the media server has quit, it is NULL and the control thread crashes.
+	TimeSource();
 
 	/* Set up the parameter web */
 
@@ -577,6 +615,15 @@ VideoProducer::Connect(status_t error, const media_source &source,
 		return;
 	}
 
+	// The camera streams the size of this connection. Another format
+	// proposal since PrepareToConnect() may have chosen a different one.
+	uint32 width = format.u.raw_video.display.line_width;
+	uint32 height = format.u.raw_video.display.line_count;
+	if (fCamDevice->AcceptVideoFrame(width, height) != B_OK) {
+		PRINTF(0, ("Connect: The camera does not offer that size\n"));
+		return;
+	}
+
 	// 4 * width * height below must not overflow.
 	if (!cam_video_size_allowed(format.u.raw_video.display.line_width,
 			format.u.raw_video.display.line_count)) {
@@ -868,6 +915,37 @@ VideoProducer::_GetResolution(bigtime_t* lastChange, void* value, size_t* size)
 }
 
 
+/*!	Streams from the camera again after it has been unplugged and plugged in
+	again. The camera that went away stays as it is: nothing deletes it.
+*/
+void
+VideoProducer::_TakeCameraBack()
+{
+	const char* name = fCamDevice->FlavorInfo()->name;
+	CamDevice* camera
+		= static_cast<WebCamMediaAddOn*>(fAddOn)->PluggedCameraNamed(name);
+	if (camera == NULL || !cam_takes_over(fCamDevice->IsPlugged(), name,
+			camera->FlavorInfo()->name)) {
+		return;
+	}
+
+	const bool wasRunning = fRunning;
+	if (wasRunning)
+		HandleStop();
+
+	fCamDevice = camera;
+	if (fConnected) {
+		uint32 width = fConnectedFormat.display.line_width;
+		uint32 height = fConnectedFormat.display.line_count;
+		if (fCamDevice->AcceptVideoFrame(width, height) != B_OK)
+			PRINTF(-1, ("_TakeCameraBack: The camera lacks that size\n"));
+	}
+
+	if (wasRunning)
+		HandleStart(TimeSource()->Now());
+}
+
+
 /*!	Takes the size for the next connection that does not ask for one. The
 	running stream is left alone; the value comes from outside and is checked
 	against the camera's list.
@@ -1150,11 +1228,20 @@ VideoProducer::FrameGenerator()
 
 		PRINTF(1, ("FrameGenerator: SendBuffer...\n"));
 		/* Send the buffer on down to the consumer */
-		if (SendBuffer(buffer, fOutput.source, fOutput.destination) < B_OK) {
+		status_t status = SendBuffer(buffer, fOutput.source,
+			fOutput.destination);
+		if (status < B_OK) {
 			PRINTF(-1, ("FrameGenerator: Error sending buffer\n"));
 			/* If there is a problem sending the buffer, return it to its
 			 * buffer group. */
 			buffer->Recycle();
+		}
+		if (status == B_BAD_PORT_ID) {
+			// Only the control thread may disconnect: it waits for this
+			// thread. Stop sending until it has done so.
+			if (write_port_etc(ControlPort(), kMsgConsumerGone, NULL, 0,
+					B_RELATIVE_TIMEOUT, 0) == B_OK)
+				fEnabled = false;
 		}
 
 		_UpdateStats();

@@ -133,6 +133,7 @@ class CamDevice {
 	virtual status_t	ProbeSensor();
 	virtual void		DataLost();
 	CamSensor			*CreateSensor(const char *name);
+		void			StopDataPumps();
 		status_t		fInitStatus;
 		flavor_info		fFlavorInfo;
 		media_format	fMediaFormat;

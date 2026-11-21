@@ -11,6 +11,7 @@
 #include "UVCControls.h"
 #include "UVCDeframer.h"
 
+#include <Autolock.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -87,7 +88,8 @@ UVCCamDevice::UVCCamDevice(CamDeviceAddon& _addon, BUSBDevice* _device)
 	fHeaderDescriptor(NULL),
 	fInterruptIn(NULL),
 	fParsedFormatIndex(0),
-	fParsedFormat(kFormatNone)
+	fParsedFormat(kFormatNone),
+	fIdleThread(-1)
 {
 	uvc_frame_list_init(&fFrames);
 	memset(&fFrame, 0, sizeof(fFrame));
@@ -187,6 +189,7 @@ UVCCamDevice::UVCCamDevice(CamDeviceAddon& _addon, BUSBDevice* _device)
 
 UVCCamDevice::~UVCCamDevice()
 {
+	_WaitForIdleSwitch();
 	free(fHeaderDescriptor);
 }
 
@@ -610,6 +613,9 @@ UVCCamDevice::SupportsIsochronous()
 status_t
 UVCCamDevice::StartTransfer()
 {
+	_WaitForIdleSwitch();
+	if (!IsPlugged())
+		return B_DEV_NOT_READY;
 	if (fFrame.compressed && !fJpegDecoder.InitCheck())
 		return B_NO_MEMORY;
 	if (_ProbeCommitFormat() != B_OK)
@@ -621,7 +627,7 @@ UVCCamDevice::StartTransfer()
 	if (status == B_OK)
 		status = CamDevice::StartTransfer();
 	if (status != B_OK)
-		_SelectIdleAlternate();
+		_StartIdleSwitch();
 	return status;
 }
 
@@ -633,26 +639,40 @@ UVCCamDevice::StopTransfer()
 	// Switching to the idle setting first leaves them waiting for data that
 	// never comes, and the data pumps cannot be joined.
 	status_t status = CamDevice::StopTransfer();
-	_SelectIdleAlternate();
+	_StartIdleSwitch();
 	return status;
 }
 
 
+void
+UVCCamDevice::Unplugged()
+{
+	// The BUSBDevice is deleted after this call, and the idle switch may
+	// still use it.
+	CamDevice::Unplugged();
+	BAutolock lock(Locker());
+	_WaitForIdleSwitch();
+}
+
+
+/*!	Only a suggestion: the size the camera streams stays as it is. Reading
+	the resolution parameter during a stream ends up here.
+*/
 status_t
 UVCCamDevice::SuggestVideoFrame(uint32& width, uint32& height)
 {
-	printf("UVCCamDevice::SuggestVideoFrame(%" B_PRIu32 ", %" B_PRIu32 ")\n", width, height);
 	// 640x480 is a size every UVC camera offers and 30 frames per second fit
 	// the bandwidth of a high speed endpoint. If the camera does not have it,
 	// take the smallest size it offers.
-	width = 640;
-	height = 480;
-	if (AcceptVideoFrame(width, height) != B_OK) {
-		if (fFrames.count == 0)
-			return B_ERROR;
-		width = fFrames.frames[0].width;
-		height = fFrames.frames[0].height;
+	if (uvc_frame_list_find(&fFrames, 640, 480) != NULL) {
+		width = 640;
+		height = 480;
+		return B_OK;
 	}
+	if (fFrames.count == 0)
+		return B_ERROR;
+	width = fFrames.frames[0].width;
+	height = fFrames.frames[0].height;
 	return B_OK;
 }
 
@@ -678,15 +698,22 @@ UVCCamDevice::AcceptVideoFrame(uint32& width, uint32& height)
 	}
 
 	const uvc_frame* frame = uvc_frame_list_find(&fFrames, width, height);
-	if (frame != NULL) {
-		fFrame = *frame;
-		SetVideoFrame(BRect(0, 0, width - 1, height - 1));
-		return B_OK;
+	if (frame == NULL) {
+		fprintf(stderr, "UVCCamDevice::AcceptVideoFrame() Invalid frame"
+			" dimensions\n");
+		return B_ERROR;
 	}
 
-	fprintf(stderr, "UVCCamDevice::AcceptVideoFrame() Invalid frame dimensions"
-		"\n");
-	return B_ERROR;
+	// A format proposal may come during a stream. The camera was told the
+	// size at the start, and the frame generator reads it without a lock:
+	// the size is only taken while nothing streams.
+	BAutolock lock(Locker());
+	if (TransferEnabled())
+		return B_OK;
+
+	fFrame = *frame;
+	SetVideoFrame(BRect(0, 0, width - 1, height - 1));
+	return B_OK;
 }
 
 
@@ -890,8 +917,12 @@ UVCCamDevice::_DefaultFrameInterval() const
 status_t
 UVCCamDevice::_SelectIdleAlternate()
 {
-	printf("UVCCamDevice::_SelectIdleAlternate()\n");
-	const BUSBConfiguration* config = fDevice->ActiveConfiguration();
+	// Runs in a thread of its own: Unplugged() may forget the device
+	// meanwhile, and deletes it only after this thread has ended.
+	BUSBDevice* device = fDevice;
+	if (device == NULL)
+		return B_NO_INIT;
+	const BUSBConfiguration* config = device->ActiveConfiguration();
 	const BUSBInterface* streaming = config->InterfaceAt(fStreamingIndex);
 	if (streaming == NULL)
 		return B_BAD_INDEX;
@@ -904,6 +935,47 @@ UVCCamDevice::_SelectIdleAlternate()
 	fIsoIn = NULL;
 
 	return B_OK;
+}
+
+
+/*!	Switches the streaming interface to its idle setting in a thread of its
+	own. Some cameras take seconds to answer that request after they have
+	streamed (the C920 about two), and the application that stops the stream
+	should not wait for it. Whoever uses the interface next waits for the
+	thread with _WaitForIdleSwitch().
+*/
+void
+UVCCamDevice::_StartIdleSwitch()
+{
+	_WaitForIdleSwitch();
+
+	fIdleThread = spawn_thread(_IdleSwitchThread, "UVC idle alternate",
+		B_NORMAL_PRIORITY, this);
+	if (fIdleThread < B_OK) {
+		fIdleThread = -1;
+		_SelectIdleAlternate();
+		return;
+	}
+	resume_thread(fIdleThread);
+}
+
+
+void
+UVCCamDevice::_WaitForIdleSwitch()
+{
+	if (fIdleThread < 0)
+		return;
+
+	status_t result;
+	wait_for_thread(fIdleThread, &result);
+	fIdleThread = -1;
+}
+
+
+/*static*/ status_t
+UVCCamDevice::_IdleSwitchThread(void* data)
+{
+	return ((UVCCamDevice*)data)->_SelectIdleAlternate();
 }
 
 
@@ -1063,6 +1135,10 @@ UVCCamDevice::_DefineControls()
 bool
 UVCCamDevice::_ReadControl(const UVCControl& control, uint8 request, uint8* data)
 {
+	// An application may still show the controls of an unplugged camera.
+	BAutolock lock(Locker());
+	if (!IsPlugged())
+		return false;
 	ssize_t transferred = fDevice->ControlTransfer(USB_REQTYPE_CLASS
 		| USB_REQTYPE_INTERFACE_IN, request, control.selector << 8,
 		control.requestIndex, control.length, data);
@@ -1167,6 +1243,9 @@ UVCCamDevice::_WriteControl(int32 parameter)
 	} else
 		uvc_encode_value(control.value, length, data);
 
+	BAutolock lock(Locker());
+	if (!IsPlugged())
+		return B_DEV_NOT_READY;
 	ssize_t transferred = fDevice->ControlTransfer(USB_REQTYPE_CLASS
 		| USB_REQTYPE_INTERFACE_OUT, USB_VIDEO_RC_SET_CUR, control.selector << 8,
 		control.requestIndex, length, data);
