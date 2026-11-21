@@ -72,6 +72,7 @@ CamDevice::CamDevice(CamDeviceAddon &_addon, BUSBDevice* _device)
 		fFlavorInfoNameStr = deviceName;
 		fFlavorInfo.name = fFlavorInfoNameStr.String();
 	}
+	_addon.WebCamAddOn()->TakeFlavorId(&fFlavorInfo);
 #ifdef DEBUG_WRITE_DUMP
 	fDumpFD = open("/boot/home/webcam.out", O_CREAT|O_RDWR, 0644);
 #endif

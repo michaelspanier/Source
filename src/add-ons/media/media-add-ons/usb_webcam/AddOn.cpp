@@ -20,7 +20,6 @@
 WebCamMediaAddOn::WebCamMediaAddOn(image_id imid)
 	: BMediaAddOn(imid),
 	fNodeLock("webcam node"),
-	fNode(NULL),
 	fInitStatus(B_NO_INIT),
 	fRoster(NULL)
 {
@@ -143,9 +142,8 @@ WebCamMediaAddOn::InstantiateNodeFor(
 		*out_info = cam->FlavorInfo();
 	fRoster->Unlock();
 #endif
-	/* At most one instance of the node should be instantiated at any given
-	 * time. The locking for this restriction may be found in the VideoProducer
-	 * class. */
+	/* Each camera has its own flavor with possible_count 1, so the media kit
+	 * makes at most one node per camera. */
 	node = new VideoProducer(this, cam, cam->FlavorInfo()->name, cam->FlavorInfo()->internal_id);
 	if (node && (node->InitCheck() < B_OK)) {
 		delete node;
@@ -154,7 +152,7 @@ WebCamMediaAddOn::InstantiateNodeFor(
 
 	if (node != NULL) {
 		BAutolock lock(fNodeLock);
-		fNode = node;
+		fNodes.AddItem(node);
 	}
 	return node;
 }
@@ -165,11 +163,11 @@ WebCamMediaAddOn::CameraAdded(CamDevice* device)
 {
 	PRINT((CH "()" CT));
 	{
-		// The node may have lost its camera, and this may be that camera
-		// plugged in again.
+		// A node may have lost its camera, and this may be that camera
+		// plugged in again. Each node checks whether it is its own.
 		BAutolock lock(fNodeLock);
-		if (fNode != NULL)
-			fNode->CameraPluggedIn();
+		for (int32 i = 0; i < fNodes.CountItems(); i++)
+			static_cast<VideoProducer*>(fNodes.ItemAt(i))->CameraPluggedIn();
 	}
 	NotifyFlavorChange();
 	return B_OK;
@@ -180,6 +178,11 @@ status_t
 WebCamMediaAddOn::CameraRemoved(CamDevice* device)
 {
 	PRINT((CH "()" CT));
+	{
+		BAutolock lock(fNodeLock);
+		fFlavorIds.Remember(device->FlavorInfo()->name,
+			device->FlavorInfo()->internal_id);
+	}
 	NotifyFlavorChange();
 	return B_OK;
 }
@@ -189,8 +192,7 @@ void
 WebCamMediaAddOn::NodeDeleted(VideoProducer* node)
 {
 	BAutolock lock(fNodeLock);
-	if (fNode == node)
-		fNode = NULL;
+	fNodes.RemoveItem(node);
 }
 
 
@@ -217,15 +219,29 @@ WebCamMediaAddOn::FillDefaultFlavorInfo(flavor_info* info)
 	info->name = (char *)"USB Web Camera";
 	info->info = (char *)"USB Web Camera";
 	info->kinds = B_BUFFER_PRODUCER | B_CONTROLLABLE | B_PHYSICAL_INPUT;
-	info->flavor_flags = 0;//B_FLAVOR_IS_GLOBAL;
+	// The node must live in the media_addon_server: an application that
+	// loaded this add-on itself would count the cameras anew, and its
+	// internal ids would not match the flavor it asked for.
+	info->flavor_flags = B_FLAVOR_IS_GLOBAL;
 	info->internal_id = atomic_add((int32*)&fInternalIDCounter, 1);
-	info->possible_count = 1;//0;
+	info->possible_count = 1;
 	info->in_format_count = 0;
 	info->in_format_flags = 0;
 	info->in_formats = NULL;
 	info->out_format_count = 1;
 	info->out_format_flags = 0;
 	info->out_formats = &fMediaFormat;
+}
+
+
+/*!	Gives a camera plugged in again the id it had before; see CamFlavorIds.
+	Call it once the camera has its name.
+*/
+void
+WebCamMediaAddOn::TakeFlavorId(flavor_info* info)
+{
+	BAutolock lock(fNodeLock);
+	info->internal_id = fFlavorIds.Take(info->name, info->internal_id);
 }
 
 

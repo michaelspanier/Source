@@ -58,9 +58,6 @@ static const int32 kMsgConsumerGone = 'Cgon';
 static const int32 kMsgCameraPluggedIn = 'Cplg';
 
 
-int32 VideoProducer::fInstances = 0;
-
-
 VideoProducer::VideoProducer(
 		BMediaAddOn *addon, CamDevice *dev, const char *name, int32 internal_id)
 	: BMediaNode(name),
@@ -71,10 +68,6 @@ VideoProducer::VideoProducer(
 //	status_t err;
 
 	fInitStatus = B_NO_INIT;
-
-	/* Only allow one instance of the node to exist at any time */
-	if (atomic_add(&fInstances, 1) != 0)
-		return;
 
 	fInternalID = internal_id;
 	fAddOn = addon;
@@ -116,7 +109,6 @@ VideoProducer::~VideoProducer()
 			HandleStop();
 	}
 
-	atomic_add(&fInstances, -1);
 }
 
 

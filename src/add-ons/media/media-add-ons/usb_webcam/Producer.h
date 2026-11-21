@@ -127,7 +127,6 @@ private:
 		status_t			_SetResolution(const void* value, size_t size);
 		void				_TakeCameraBack();
 
-static	int32				fInstances;
 
 		status_t			fInitStatus;
 
