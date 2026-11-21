@@ -6,7 +6,10 @@
 #define _VIDEO_ADDON_H
 
 #include <media/MediaAddOn.h>
+#include <support/List.h>
 #include <support/Locker.h>
+
+#include "CamFlavorIds.h"
 
 #define TOUCH(x) ((void)(x))
 
@@ -45,13 +48,15 @@ public:
 		status_t		CameraAdded(CamDevice* device);
 		status_t		CameraRemoved(CamDevice* device);
 		void			FillDefaultFlavorInfo(flavor_info* info);
+		void			TakeFlavorId(flavor_info* info);
 		// for the node
 		void			NodeDeleted(VideoProducer* node);
 		CamDevice*		PluggedCameraNamed(const char* name);
 
 private:
 	BLocker				fNodeLock;
-	VideoProducer*		fNode;
+	BList				fNodes;
+	CamFlavorIds		fFlavorIds;
 	uint32				fInternalIDCounter;
 	status_t			fInitStatus;
 	flavor_info			fDefaultFlavorInfo;
