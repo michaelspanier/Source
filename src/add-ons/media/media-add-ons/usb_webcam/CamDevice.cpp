@@ -44,7 +44,9 @@ CamDevice::CamDevice(CamDeviceAddon &_addon, BUSBDevice* _device)
 	  fSupportedDeviceIndex(-1),
 	  fChipIsBigEndian(false),
 	  fTransferEnabled(false),
-	  fLocker("WebcamDeviceLock")
+	  fLocker("WebcamDeviceLock"),
+	  fIsoQueued(0),
+	  fIsoDelivered(0)
 {
 	// fill in the generic flavor
 	_addon.WebCamAddOn()->FillDefaultFlavorInfo(&fFlavorInfo);
@@ -564,54 +566,16 @@ CamDevice::DataPumpThread()
 	}
 #ifdef SUPPORT_ISO
 	else if (SupportsIsochronous()) {
-		int numPacketDescriptors = 16;
-		usb_iso_packet_descriptor packetDescriptors[numPacketDescriptors];
-		
-		// Initialize packetDescriptor request lengths
-		for (int i = 0; i<numPacketDescriptors; i++)
-			packetDescriptors[i].request_length = 256;	
-
-		while (fTransferEnabled) {
-			ssize_t len = -1;
-			BAutolock lock(fLocker);
-			if (!lock.IsLocked())
-				break;
-			if (!fIsoIn)
-				break;
-#ifndef DEBUG_DISCARD_INPUT
-			len = fIsoIn->IsochronousTransfer(fBuffer, fBufferLen, packetDescriptors,
-				numPacketDescriptors);
-#endif
-
-			//PRINT((CH ": got %d bytes" CT, len));
-#ifdef DEBUG_WRITE_DUMP
-			write(fDumpFD, fBuffer, len);
-#endif
-#ifdef DEBUG_READ_DUMP
-			if ((len = read(fDumpFD, fBuffer, fBufferLen)) < fBufferLen)
-				lseek(fDumpFD, 0LL, SEEK_SET);
-#endif
-
-			if (len <= 0) {
-				PRINT((CH ": IsoIn: %s" CT, strerror(len)));
-				continue;
-			}
-
-#ifndef DEBUG_DISCARD_DATA
-			if (fDataInput) {
-				int fBufferIndex = 0;
-				for (int i = 0; i < numPacketDescriptors; i++) {
-					int actual_length = ((usb_iso_packet_descriptor)
-						packetDescriptors[i]).actual_length;
-					if (actual_length > 0) {
-						fDataInput->Write(&fBuffer[fBufferIndex],
-							actual_length);
-					}
-					fBufferIndex += actual_length;
-				}				
-			}
-#endif
-			//snooze(2000);
+		// Two transfers are kept in flight. A single synchronous transfer
+		// leaves the endpoint without a request between one transfer and the
+		// next, and the camera keeps sending, so packets would get lost.
+		thread_id second = spawn_thread(_IsoPumpThread, "USB Webcam Data Pump 2", 50, this);
+		if (second >= B_OK)
+			resume_thread(second);
+		_IsoPump();
+		if (second >= B_OK) {
+			status_t result;
+			wait_for_thread(second, &result);
 		}
 	}
 #endif
@@ -620,6 +584,147 @@ CamDevice::DataPumpThread()
 		return B_UNSUPPORTED;
 	}
 	return B_OK;
+}
+
+
+static const int kMaxIsoPackets = 128;
+static const size_t kMaxIsoTransferBytes = 64 * 1024;
+static const int kIsoTurnTries = 50;
+static const bigtime_t kIsoTurnWait = 100;
+
+
+struct iso_transfer {
+	uint8*						buffer;
+	size_t						packetLength;
+	int							packetCount;
+	bool						received;
+	usb_iso_packet_descriptor	packets[kMaxIsoPackets];
+};
+
+
+/*!	The room a packet of \a endpoint needs per interval: bits 0 to 10 of the
+	maximum packet size are the size, bits 11 and 12 the extra transactions.
+*/
+static size_t
+iso_packet_length(const BUSBEndpoint* endpoint)
+{
+	uint16 maxPacketSize = endpoint->MaxPacketSize();
+	size_t length = (maxPacketSize & 0x7ff) * (1 + ((maxPacketSize >> 11) & 3));
+	return length != 0 ? length : 256;
+}
+
+
+//!	Does nothing; a camera whose deframer can drop a frame overrides it.
+void
+CamDevice::DataLost()
+{
+}
+
+
+status_t
+CamDevice::_IsoPump()
+{
+	const BUSBEndpoint* endpoint = fIsoIn;
+	if (endpoint == NULL)
+		return B_NO_INIT;
+
+	// The USB stack needs one contiguous buffer per transfer, so a transfer
+	// with large packets gets fewer of them.
+	iso_transfer transfer;
+	transfer.packetLength = iso_packet_length(endpoint);
+	transfer.packetCount = kMaxIsoTransferBytes / transfer.packetLength;
+	if (transfer.packetCount > kMaxIsoPackets)
+		transfer.packetCount = kMaxIsoPackets;
+	if (transfer.packetCount < 1)
+		transfer.packetCount = 1;
+
+	const size_t bufferLength = transfer.packetCount * transfer.packetLength;
+	transfer.buffer = (uint8*)malloc(bufferLength);
+	if (transfer.buffer == NULL)
+		return B_NO_MEMORY;
+
+	for (int i = 0; i < transfer.packetCount; i++)
+		transfer.packets[i].request_length = transfer.packetLength;
+
+	while (fTransferEnabled) {
+		const int64 ticket = _TakeIsoTicket();
+		ssize_t length = endpoint->IsochronousTransfer(transfer.buffer,
+			bufferLength, transfer.packets, transfer.packetCount);
+		transfer.received = length > 0;
+		_DeliverIsoTransfer(ticket, transfer);
+		if (!transfer.received) {
+			PRINT((CH ": IsoIn: %s" CT, strerror(length)));
+			snooze(1000);
+		}
+	}
+
+	free(transfer.buffer);
+	return B_OK;
+}
+
+
+//!	Numbers the transfers in the order they are queued.
+int64
+CamDevice::_TakeIsoTicket()
+{
+	BAutolock order(fIsoOrder);
+	return fIsoQueued++;
+}
+
+
+/*!	Two transfers are in flight, and the thread that wakes first does not
+	always get here first. The transfers are passed on in the order of their
+	tickets. One that comes too late, or holds a damaged packet, costs the
+	frame it falls into.
+*/
+void
+CamDevice::_DeliverIsoTransfer(int64 ticket, const iso_transfer& transfer)
+{
+	BAutolock order(fIsoOrder);
+	const bool inTurn = _WaitIsoTurn(ticket);
+	if (fIsoDelivered <= ticket)
+		fIsoDelivered = ticket + 1;
+
+	if (fDataInput == NULL)
+		return;
+	if (!inTurn || !transfer.received) {
+		DataLost();
+		return;
+	}
+
+	// Each packet sits at its own slot of packetLength bytes.
+	for (int i = 0; i < transfer.packetCount; i++) {
+		const usb_iso_packet_descriptor& packet = transfer.packets[i];
+		if (packet.status != B_OK) {
+			DataLost();
+			continue;
+		}
+		if (packet.actual_length > 0) {
+			fDataInput->Write(&transfer.buffer[i * transfer.packetLength],
+				packet.actual_length);
+		}
+	}
+}
+
+
+//!	Waits with fIsoOrder held, up to a bound, until \a ticket is next.
+bool
+CamDevice::_WaitIsoTurn(int64 ticket)
+{
+	for (int i = 0; fIsoDelivered < ticket && i < kIsoTurnTries; i++) {
+		fIsoOrder.Unlock();
+		snooze(kIsoTurnWait);
+		fIsoOrder.Lock();
+	}
+	return fIsoDelivered == ticket;
+}
+
+
+int32
+CamDevice::_IsoPumpThread(void *_this)
+{
+	CamDevice *dev = (CamDevice *)_this;
+	return dev->_IsoPump();
 }
 
 
