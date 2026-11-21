@@ -7,5 +7,6 @@ SimpleTest CamDeviceNameTest : CamDeviceNameTest.cpp ;
 SimpleTest CamVideoSizeTest : CamVideoSizeTest.cpp ;
 SimpleTest UVCColorBenchmark : UVCColorBenchmark.cpp ;
 SimpleTest UVCColorTest : UVCColorTest.cpp ;
+SimpleTest UVCControlsTest : UVCControlsTest.cpp ;
 SimpleTest UVCFrameBufferTest : UVCFrameBufferTest.cpp ;
 SimpleTest UVCPayloadTest : UVCPayloadTest.cpp ;
