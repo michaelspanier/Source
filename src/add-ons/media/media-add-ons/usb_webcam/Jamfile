@@ -73,6 +73,7 @@ actions USBWebcamHeaderGen1
 local architectureObject ;
 for architectureObject in [ MultiArchSubDirSetup ] {
 	on $(architectureObject) {
+		UseBuildFeatureHeaders jpeg ;
 
 		USBWebcamHeaderGen CamInternalAddons.h : B_WEBCAM_MKINTFUNC
 			: $(addonSources) ;
@@ -101,8 +102,13 @@ for architectureObject in [ MultiArchSubDirSetup ] {
 			CamRoster.cpp
 			CamSensor.cpp
 			CamStreamingDeframer.cpp
-			: be media $(usbKitLibraryName) [ TargetLibsupc++ ]
+			UVCJpegDecoder.cpp
+			: be media $(usbKitLibraryName) [ BuildFeatureAttribute jpeg : library ]
+			[ TargetLibsupc++ ]
 		;
+
+		Includes [ FGristFiles UVCJpegDecoder.cpp ]
+			: [ BuildFeatureAttribute jpeg : headers ] ;
 	}
 }
 

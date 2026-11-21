@@ -816,12 +816,12 @@ VideoProducer::_AddResolutionParameter(BParameterGroup* group)
 		->MakeDiscreteParameter(P_RESOLUTION, B_MEDIA_RAW_VIDEO, "Resolution",
 			B_RESOLUTION);
 	for (int32 i = 0; i < fCamDevice->CountVideoSizes(); i++) {
-		uint32 width, height, interval;
-		if (!fCamDevice->VideoSizeAt(i, width, height, interval))
+		cam_video_size size;
+		if (!fCamDevice->VideoSizeAt(i, size))
 			continue;
-		char label[48];
-		cam_size_label(label, sizeof(label), width, height, interval);
-		sizes->AddItem(cam_size_to_parameter(width, height), label);
+		char label[64];
+		cam_size_label(label, sizeof(label), size);
+		sizes->AddItem(cam_size_to_parameter(size.width, size.height), label);
 	}
 }
 
@@ -830,9 +830,9 @@ bool
 VideoProducer::_HasVideoSize(uint32 width, uint32 height) const
 {
 	for (int32 i = 0; i < fCamDevice->CountVideoSizes(); i++) {
-		uint32 w, h, interval;
-		if (fCamDevice->VideoSizeAt(i, w, h, interval) && w == width
-			&& h == height) {
+		cam_video_size size;
+		if (fCamDevice->VideoSizeAt(i, size) && size.width == width
+			&& size.height == height) {
 			return true;
 		}
 	}

@@ -10,8 +10,13 @@
 
 #include "CamDevice.h"
 #include "UVCControls.h"
+#include "UVCFrameList.h"
+#include "UVCJpegDecoder.h"
 #include "USB_video.h"
 #include <usb/USB_video.h>
+
+
+class CamFrame;
 
 
 class UVCCamDevice : public CamDevice {
@@ -28,8 +33,8 @@ public:
 	virtual status_t			AcceptVideoFrame(uint32 &width,
 									uint32 &height);
 	virtual int32				CountVideoSizes() const;
-	virtual bool				VideoSizeAt(int32 index, uint32 &width,
-									uint32 &height, uint32 &interval) const;
+	virtual bool				VideoSizeAt(int32 index,
+									cam_video_size& size) const;
 	virtual void				AddParameters(BParameterGroup *group,
 									int32 &index);
 	virtual status_t			GetParameterValue(int32 id,
@@ -48,6 +53,11 @@ private:
 			void				_ParseVideoStreaming(
 									const usbvc_class_descriptor* descriptor,
 									size_t len);
+			void				_AddFrame(
+									const usb_video_frame_descriptor& descriptor,
+									bool compressed);
+			status_t			_Decode(const CamFrame& frame,
+									const uvc_picture& picture);
 			status_t			_ProbeCommitFormat();
 			status_t			_SelectBestAlternate();
 			status_t			_ResetDeframer();
@@ -79,15 +89,14 @@ private:
 			uint32				fControlIndex;
 			uint16				fControlRequestIndex;
 			uint32				fStreamingIndex;
-			uint32				fUncompressedFormatIndex;
-			uint32				fUncompressedFrameIndex;
-			uint32				fMJPEGFormatIndex;
-			uint32				fMJPEGFrameIndex;
+			uint8				fParsedFormatIndex;
+			uint8				fParsedFormat;
 			uint32				fMaxVideoFrameSize;
 			uint32				fMaxPayloadTransferSize;
 
-			BList				fUncompressedFrames;
-			BList				fMJPEGFrames;
+			uvc_frame_list		fFrames;
+			uvc_frame			fFrame;
+			UVCJpegDecoder		fJpegDecoder;
 
 			uint16				fCameraRequestIndex;
 			uint8				fCameraControls;
