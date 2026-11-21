@@ -8,6 +8,7 @@
 #include "CamSensor.h"
 #include "CamDeframer.h"
 #include "CamDebug.h"
+#include "CamDeviceName.h"
 #include "AddOn.h"
 
 #include <OS.h>
@@ -60,6 +61,15 @@ CamDevice::CamDevice(CamDeviceAddon &_addon, BUSBDevice* _device)
 		fFlavorInfoInfoStr << " (" << fCamDeviceAddon.SupportedDevices()[fSupportedDeviceIndex].product << ") USB Webcam";
 		fFlavorInfo.name = fFlavorInfoNameStr.String();
 		fFlavorInfo.info = fFlavorInfoInfoStr.String();
+	}
+
+	// All cameras of one add-on get the same generic name above; the product
+	// string of the device tells them apart, for example "Integrated Camera".
+	char deviceName[B_MEDIA_NAME_LENGTH];
+	if (cam_device_name(deviceName, sizeof(deviceName),
+			_device->ProductString())) {
+		fFlavorInfoNameStr = deviceName;
+		fFlavorInfo.name = fFlavorInfoNameStr.String();
 	}
 #ifdef DEBUG_WRITE_DUMP
 	fDumpFD = open("/boot/home/webcam.out", O_CREAT|O_RDWR, 0644);
