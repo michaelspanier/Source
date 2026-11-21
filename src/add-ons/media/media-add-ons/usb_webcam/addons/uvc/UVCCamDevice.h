@@ -26,6 +26,9 @@ public:
 									uint32 &height);
 	virtual status_t			AcceptVideoFrame(uint32 &width,
 									uint32 &height);
+	virtual int32				CountVideoSizes() const;
+	virtual bool				VideoSizeAt(int32 index, uint32 &width,
+									uint32 &height, uint32 &interval) const;
 	virtual void				AddParameters(BParameterGroup *group,
 									int32 &index);
 	virtual status_t			GetParameterValue(int32 id,

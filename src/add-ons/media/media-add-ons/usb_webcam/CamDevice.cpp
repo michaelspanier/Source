@@ -8,6 +8,7 @@
 #include "CamSensor.h"
 #include "CamDeframer.h"
 #include "CamDebug.h"
+#include "CamDeviceName.h"
 #include "AddOn.h"
 
 #include <OS.h>
@@ -60,6 +61,15 @@ CamDevice::CamDevice(CamDeviceAddon &_addon, BUSBDevice* _device)
 		fFlavorInfoInfoStr << " (" << fCamDeviceAddon.SupportedDevices()[fSupportedDeviceIndex].product << ") USB Webcam";
 		fFlavorInfo.name = fFlavorInfoNameStr.String();
 		fFlavorInfo.info = fFlavorInfoInfoStr.String();
+	}
+
+	// All cameras of one add-on get the same generic name above; the product
+	// string of the device tells them apart, for example "Integrated Camera".
+	char deviceName[B_MEDIA_NAME_LENGTH];
+	if (cam_device_name(deviceName, sizeof(deviceName),
+			_device->ProductString())) {
+		fFlavorInfoNameStr = deviceName;
+		fFlavorInfo.name = fFlavorInfoNameStr.String();
 	}
 #ifdef DEBUG_WRITE_DUMP
 	fDumpFD = open("/boot/home/webcam.out", O_CREAT|O_RDWR, 0644);
@@ -203,6 +213,24 @@ CamDevice::SuggestVideoFrame(uint32 &width, uint32 &height)
 		return B_OK;
 	}
 	return B_NO_INIT;
+}
+
+
+int32
+CamDevice::CountVideoSizes() const
+{
+	return 0;
+}
+
+
+/*!	Tells the size at \a index of the list the camera offers, and its
+	frame interval in 100 ns (0 if unknown).
+*/
+bool
+CamDevice::VideoSizeAt(int32 index, uint32 &width, uint32 &height,
+	uint32 &interval) const
+{
+	return false;
 }
 
 
