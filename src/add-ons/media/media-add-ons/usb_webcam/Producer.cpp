@@ -23,6 +23,7 @@
 #include <interface/Bitmap.h>
 
 #include "CamDevice.h"
+#include "CamVideoSize.h"
 #include "CamSensor.h"
 
 // don't separate parameters from addon, device and sensor
@@ -83,6 +84,10 @@ VideoProducer::VideoProducer(
 	fEnabled = false;
 
 	fOutput.destination = media_destination::null;
+
+	fPreferredWidth = 0;
+	fPreferredHeight = 0;
+	fLastSizeChange = 0;
 
 	AddNodeKind(B_PHYSICAL_INPUT);
 
@@ -184,6 +189,8 @@ VideoProducer::NodeRegistered()
 	g = main->MakeGroup("Info");
 	p = g->MakeTextParameter(
 		P_INFO, B_MEDIA_RAW_VIDEO, "", "Info", 256);
+
+	_AddResolutionParameter(main);
 
 	int32 id = P_LAST;
 	if (fCamDevice) {
@@ -342,7 +349,7 @@ VideoProducer::FormatSuggestionRequested(
 
 	*format = fOutput.format;
 	uint32 width, height;
-	if (fCamDevice && fCamDevice->SuggestVideoFrame(width, height) == B_OK) {
+	if (_SuggestSize(width, height)) {
 		format->u.raw_video.display.line_width = width;
 		format->u.raw_video.display.line_count = height;
 	}
@@ -507,7 +514,7 @@ VideoProducer::PrepareToConnect(const media_source &source,
 	if (fCamDevice != NULL && (format->u.raw_video.display.line_width == 0
 			|| format->u.raw_video.display.line_count == 0)) {
 		uint32 width, height;
-		if (fCamDevice->SuggestVideoFrame(width, height) == B_OK) {
+		if (_SuggestSize(width, height)) {
 			format->u.raw_video.display.line_width = width;
 			format->u.raw_video.display.line_count = height;
 		}
@@ -567,6 +574,13 @@ VideoProducer::Connect(status_t error, const media_source &source,
 	if (source != fOutput.source || error < B_OK
 		|| !const_cast<media_format *>(&format)->Matches(&fOutput.format)) {
 		PRINTF(1, ("Connect: Connect error\n"));
+		return;
+	}
+
+	// 4 * width * height below must not overflow.
+	if (!cam_video_size_allowed(format.u.raw_video.display.line_width,
+			format.u.raw_video.display.line_count)) {
+		PRINTF(0, ("Connect: The size is too large\n"));
 		return;
 	}
 
@@ -726,6 +740,8 @@ VideoProducer::GetParameterValue(
 			*size = fInfoString.Length() + 1;
 			memcpy(value, fInfoString.String(), *size);
 			return B_OK;
+		case P_RESOLUTION:
+			return _GetResolution(last_change, value, size);
 	}
 
 	if (fCamDevice) {
@@ -764,6 +780,11 @@ VideoProducer::SetParameterValue(
 		case P_INFO:
 			// forbidden
 			return;
+		case P_RESOLUTION:
+			if (_SetResolution(value, size) != B_OK)
+				return;
+			fLastSizeChange = when;
+			break;
 		default:
 			if (fCamDevice == NULL)
 				return;
@@ -779,6 +800,93 @@ VideoProducer::SetParameterValue(
 		BroadcastNewParameterValue(when, id, (void *)value, size);
 }
 
+
+
+/*!	Publishes the sizes the camera offers as a B_RESOLUTION parameter, so
+	that applications do not have to guess them. See CamVideoSize.h for the
+	values of the items.
+*/
+void
+VideoProducer::_AddResolutionParameter(BParameterGroup* group)
+{
+	if (fCamDevice == NULL || fCamDevice->CountVideoSizes() == 0)
+		return;
+
+	BDiscreteParameter* sizes = group->MakeGroup("Format")
+		->MakeDiscreteParameter(P_RESOLUTION, B_MEDIA_RAW_VIDEO, "Resolution",
+			B_RESOLUTION);
+	for (int32 i = 0; i < fCamDevice->CountVideoSizes(); i++) {
+		uint32 width, height, interval;
+		if (!fCamDevice->VideoSizeAt(i, width, height, interval))
+			continue;
+		char label[48];
+		cam_size_label(label, sizeof(label), width, height, interval);
+		sizes->AddItem(cam_size_to_parameter(width, height), label);
+	}
+}
+
+
+bool
+VideoProducer::_HasVideoSize(uint32 width, uint32 height) const
+{
+	for (int32 i = 0; i < fCamDevice->CountVideoSizes(); i++) {
+		uint32 w, h, interval;
+		if (fCamDevice->VideoSizeAt(i, w, h, interval) && w == width
+			&& h == height) {
+			return true;
+		}
+	}
+	return false;
+}
+
+
+//!	The size chosen with the parameter, otherwise the one the device prefers.
+bool
+VideoProducer::_SuggestSize(uint32& width, uint32& height)
+{
+	if (fPreferredWidth != 0) {
+		width = fPreferredWidth;
+		height = fPreferredHeight;
+		return true;
+	}
+	return fCamDevice != NULL
+		&& fCamDevice->SuggestVideoFrame(width, height) == B_OK;
+}
+
+
+status_t
+VideoProducer::_GetResolution(bigtime_t* lastChange, void* value, size_t* size)
+{
+	uint32 width, height;
+	if (*size < sizeof(int32) || !_SuggestSize(width, height))
+		return B_BAD_VALUE;
+
+	*lastChange = fLastSizeChange;
+	*size = sizeof(int32);
+	*(int32*)value = cam_size_to_parameter(width, height);
+	return B_OK;
+}
+
+
+/*!	Takes the size for the next connection that does not ask for one. The
+	running stream is left alone; the value comes from outside and is checked
+	against the camera's list.
+*/
+status_t
+VideoProducer::_SetResolution(const void* value, size_t size)
+{
+	// uint32_t, not uint32: with gcc 2 the two are different pointer types.
+	uint32_t width, height;
+	if (fCamDevice == NULL || value == NULL || size != sizeof(int32)
+		|| !cam_size_from_parameter(*(const int32*)value, &width, &height)
+		|| !_HasVideoSize(width, height)) {
+		return B_BAD_VALUE;
+	}
+
+	fPreferredWidth = width;
+	fPreferredHeight = height;
+	return B_OK;
+}
 
 status_t
 VideoProducer::StartControlPanel(BMessenger *out_messenger)

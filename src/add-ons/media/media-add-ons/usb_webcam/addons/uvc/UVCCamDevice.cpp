@@ -647,6 +647,29 @@ UVCCamDevice::AcceptVideoFrame(uint32& width, uint32& height)
 }
 
 
+int32
+UVCCamDevice::CountVideoSizes() const
+{
+	return fUncompressedFrames.CountItems();
+}
+
+
+bool
+UVCCamDevice::VideoSizeAt(int32 index, uint32& width, uint32& height,
+	uint32& interval) const
+{
+	const usb_video_frame_descriptor* descriptor
+		= (const usb_video_frame_descriptor*)fUncompressedFrames.ItemAt(index);
+	if (descriptor == NULL)
+		return false;
+
+	width = descriptor->width;
+	height = descriptor->height;
+	interval = descriptor->default_frame_interval;
+	return true;
+}
+
+
 void
 UVCCamDevice::DataLost()
 {

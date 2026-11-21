@@ -216,6 +216,24 @@ CamDevice::SuggestVideoFrame(uint32 &width, uint32 &height)
 }
 
 
+int32
+CamDevice::CountVideoSizes() const
+{
+	return 0;
+}
+
+
+/*!	Tells the size at \a index of the list the camera offers, and its
+	frame interval in 100 ns (0 if unknown).
+*/
+bool
+CamDevice::VideoSizeAt(int32 index, uint32 &width, uint32 &height,
+	uint32 &interval) const
+{
+	return false;
+}
+
+
 status_t
 CamDevice::AcceptVideoFrame(uint32 &width, uint32 &height)
 {

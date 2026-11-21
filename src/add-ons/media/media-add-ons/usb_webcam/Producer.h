@@ -18,6 +18,9 @@ class CamDevice;
 class BParameter;
 class BTextParameter;
 
+class BParameterGroup;
+
+
 class VideoProducer :
 	public virtual BMediaEventLooper,
 	public virtual BBufferProducer,
@@ -113,6 +116,12 @@ private:
 		void				HandleSeek(bigtime_t performance_time);
 
 		void				_UpdateStats();
+		void				_AddResolutionParameter(BParameterGroup* group);
+		bool				_HasVideoSize(uint32 width, uint32 height) const;
+		bool				_SuggestSize(uint32& width, uint32& height);
+		status_t			_GetResolution(bigtime_t* lastChange, void* value,
+								size_t* size);
+		status_t			_SetResolution(const void* value, size_t size);
 
 static	int32				fInstances;
 
@@ -145,11 +154,15 @@ static	int32				_frame_generator_(void *data);
 		enum {
 			 P_COLOR,
 			 P_INFO,
+			 P_RESOLUTION,
 			 P_LAST			// first available for addons
 		};
 		uint32				fColor;
 		BString				fInfoString;
 		bigtime_t			fLastColorChange;	// TODO: rename
+		uint32				fPreferredWidth;
+		uint32				fPreferredHeight;
+		bigtime_t			fLastSizeChange;
 
 		struct {
 			uint32 frames;
